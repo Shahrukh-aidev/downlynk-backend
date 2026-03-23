@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Downlynk — Download Anything, Instantly</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#080c14;--bg2:#0d1321;--card:#0f1824;--border:#1e2d42;--cyan:#00e5ff;--green:#00ff88;--red:#ff4d6d;--text:#e2e8f0;--muted:#64748b;--font-display:'Syne',sans-serif;--font-mono:'Space Mono',monospace}
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--text);font-family:var(--font-display);overflow-x:hidden}
+  body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:.4}
+  nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:18px 48px;background:rgba(8,12,20,.85);backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
+  .logo{display:flex;align-items:center;gap:10px;text-decoration:none}
+  .logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--cyan),var(--green));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px}
+  .logo-text{font-size:20px;font-weight:800;color:var(--text);letter-spacing:-.5px}
+  .logo-text span{color:var(--cyan)}
+  .nav-links{display:flex;gap:32px;list-style:none}
+  .nav-links a{color:var(--muted);text-decoration:none;font-size:14px;font-weight:600;letter-spacing:.5px;transition:color .2s;font-family:var(--font-mono)}
+  .nav-links a:hover{color:var(--cyan)}
+  .nav-cta{border:1px solid var(--cyan);color:var(--cyan)!important;padding:8px 20px;border-radius:8px;transition:all .2s!important}
+  .nav-cta:hover{background:var(--cyan)!important;color:var(--bg)!important}
+  .hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:120px 24px 80px;position:relative;text-align:center}
+  .hero::before{content:'';position:absolute;top:20%;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(0,229,255,.08) 0%,transparent 70%);pointer-events:none}
+  .hero-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.2);color:var(--cyan);padding:6px 16px;border-radius:100px;font-size:12px;font-family:var(--font-mono);letter-spacing:1px;margin-bottom:32px;animation:fadeInDown .6s ease both}
+  .badge-dot{width:6px;height:6px;background:var(--green);border-radius:50%;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
+  @keyframes fadeInDown{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}
+  .hero h1{font-size:clamp(48px,8vw,96px);font-weight:800;line-height:1;letter-spacing:-3px;margin-bottom:24px;animation:fadeInDown .6s ease .1s both}
+  .hero h1 .line2{background:linear-gradient(90deg,var(--cyan),var(--green));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+  .hero p{font-size:18px;color:var(--muted);max-width:520px;line-height:1.7;margin-bottom:32px;animation:fadeInDown .6s ease .2s both}
+  .video-info{display:none;width:100%;max-width:680px;background:var(--card);border:1px solid rgba(0,229,255,.2);border-radius:16px;padding:16px 20px;margin-bottom:16px;flex-direction:row;align-items:center;gap:16px;animation:fadeInDown .3s ease both}
+  .video-info.active{display:flex}
+  .video-thumb{width:80px;height:56px;object-fit:cover;border-radius:8px;background:var(--border);flex-shrink:0}
+  .video-meta{text-align:left;flex:1;overflow:hidden}
+  .video-title{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .video-sub{font-size:12px;color:var(--muted);font-family:var(--font-mono);margin-top:4px}
+  .downloader{width:100%;max-width:680px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:8px;display:flex;gap:8px;margin-bottom:16px;animation:fadeInDown .6s ease .3s both;position:relative;z-index:1}
+  .downloader::before{content:'';position:absolute;inset:-1px;border-radius:21px;background:linear-gradient(135deg,rgba(0,229,255,.3),rgba(0,255,136,.1),transparent);z-index:-1}
+  .url-input{flex:1;background:transparent;border:none;outline:none;color:var(--text);font-family:var(--font-mono);font-size:14px;padding:14px 20px;caret-color:var(--cyan)}
+  .url-input::placeholder{color:var(--muted)}
+  .download-btn{background:linear-gradient(135deg,var(--cyan),var(--green));color:var(--bg);border:none;padding:14px 28px;border-radius:14px;font-family:var(--font-display);font-size:14px;font-weight:700;cursor:pointer;transition:all .2s;white-space:nowrap}
+  .download-btn:hover{transform:scale(1.03);box-shadow:0 0 30px rgba(0,229,255,.3)}
+  .download-btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
+  .progress-container{display:none;width:100%;max-width:680px;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px 24px;margin-bottom:16px}
+  .progress-container.active{display:block}
+  .progress-label{display:flex;justify-content:space-between;font-size:13px;font-family:var(--font-mono);color:var(--muted);margin-bottom:10px}
+  .progress-label span:last-child{color:var(--cyan)}
+  .progress-bar-bg{width:100%;height:4px;background:var(--border);border-radius:100px;overflow:hidden}
+  .progress-bar-fill{height:100%;background:linear-gradient(90deg,var(--cyan),var(--green));border-radius:100px;width:0%;transition:width .4s ease}
+  .status-msg{font-size:13px;font-family:var(--font-mono);color:var(--muted);margin-bottom:24px;min-height:20px}
+  .status-msg.success{color:var(--green)}
+  .status-msg.error{color:var(--red)}
+  .hero-stats{display:flex;gap:40px;animation:fadeInDown .6s ease .4s both}
+  .stat{text-align:center}
+  .stat-num{font-size:28px;font-weight:800;background:linear-gradient(90deg,var(--cyan),var(--green));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+  .stat-label{font-size:12px;color:var(--muted);font-family:var(--font-mono);letter-spacing:1px}
+  .platforms{padding:80px 48px}
+  .section-label{font-family:var(--font-mono);font-size:12px;letter-spacing:2px;color:var(--cyan);text-transform:uppercase;margin-bottom:16px}
+  .section-title{font-size:42px;font-weight:800;letter-spacing:-1px;margin-bottom:48px}
+  .platforms-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:16px;max-width:1100px;margin:0 auto}
+  .platform-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px 20px;text-align:center;transition:all .3s}
+  .platform-card:hover{border-color:var(--cyan);transform:translateY(-4px);box-shadow:0 8px 32px rgba(0,229,255,.1)}
+  .platform-icon{font-size:32px;margin-bottom:10px}
+  .platform-name{font-size:14px;font-weight:600}
+  .platform-tag{font-size:11px;font-family:var(--font-mono);color:var(--green);margin-top:4px}
+  .how{padding:80px 48px;max-width:1100px;margin:0 auto}
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:48px}
+  .step-card{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:32px;position:relative;overflow:hidden;transition:all .3s}
+  .step-card:hover{border-color:rgba(0,229,255,.3);transform:translateY(-4px)}
+  .step-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cyan),var(--green));opacity:0;transition:opacity .3s}
+  .step-card:hover::before{opacity:1}
+  .step-num{font-family:var(--font-mono);font-size:48px;font-weight:700;color:var(--border);line-height:1;margin-bottom:16px}
+  .step-title{font-size:20px;font-weight:700;margin-bottom:12px}
+  .step-desc{font-size:14px;color:var(--muted);line-height:1.7}
+  .features{padding:80px 48px;background:var(--bg2)}
+  .features-inner{max-width:1100px;margin:0 auto}
+  .features-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:24px;margin-top:48px}
+  .feature-card{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:32px;display:flex;gap:20px;align-items:flex-start;transition:all .3s}
+  .feature-card:hover{border-color:rgba(0,255,136,.3)}
+  .feature-icon{width:48px;height:48px;background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.15);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
+  .feature-content h3{font-size:18px;font-weight:700;margin-bottom:8px}
+  .feature-content p{font-size:14px;color:var(--muted);line-height:1.7}
+  .desktop-section{padding:80px 48px;max-width:1100px;margin:0 auto}
+  .desktop-card{background:var(--card);border:1px solid var(--border);border-radius:24px;padding:64px;display:flex;align-items:center;justify-content:space-between;gap:48px;position:relative;overflow:hidden}
+  .desktop-card::before{content:'';position:absolute;top:-100px;right:-100px;width:400px;height:400px;background:radial-gradient(circle,rgba(0,255,136,.08) 0%,transparent 70%);pointer-events:none}
+  .desktop-content h2{font-size:40px;font-weight:800;letter-spacing:-1px;margin-bottom:16px}
+  .desktop-content p{font-size:16px;color:var(--muted);line-height:1.7;margin-bottom:32px;max-width:420px}
+  .desktop-btns{display:flex;gap:16px;flex-wrap:wrap}
+  .btn-primary{background:linear-gradient(135deg,var(--cyan),var(--green));color:var(--bg);border:none;padding:14px 28px;border-radius:12px;font-family:var(--font-display);font-size:15px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px;transition:all .2s}
+  .btn-primary:hover{transform:scale(1.03);box-shadow:0 0 30px rgba(0,229,255,.3)}
+  .btn-secondary{background:transparent;color:var(--text);border:1px solid var(--border);padding:14px 28px;border-radius:12px;font-family:var(--font-display);font-size:15px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px;transition:all .2s}
+  .btn-secondary:hover{border-color:var(--cyan);color:var(--cyan)}
+  .desktop-visual{flex-shrink:0;width:280px;height:280px;background:rgba(0,229,255,.05);border:1px solid rgba(0,229,255,.1);border-radius:24px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
+  .app-size{font-family:var(--font-mono);font-size:11px;background:rgba(0,255,136,.1);color:var(--green);padding:4px 12px;border-radius:100px;border:1px solid rgba(0,255,136,.2)}
+  footer{padding:48px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  .footer-logo{font-size:20px;font-weight:800}
+  .footer-logo span{color:var(--cyan)}
+  .footer-note{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+  .footer-links{display:flex;gap:24px}
+  .footer-links a{font-family:var(--font-mono);font-size:12px;color:var(--muted);text-decoration:none;transition:color .2s}
+  .footer-links a:hover{color:var(--cyan)}
+  ::-webkit-scrollbar{width:6px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+  ::-webkit-scrollbar-thumb:hover{background:var(--cyan)}
+  @media(max-width:768px){nav{padding:16px 24px}.nav-links{display:none}.hero{padding:100px 24px 60px}.downloader{flex-direction:column}.hero-stats{gap:24px}.steps{grid-template-columns:1fr}.features-grid{grid-template-columns:1fr}.desktop-card{flex-direction:column;padding:32px}.desktop-visual{width:100%}.platforms,.how,.features,.desktop-section{padding:60px 24px}footer{flex-direction:column;gap:24px;text-align:center}}
+</style>
+</head>
+<body>
+
+<script>
+  // ⚠️ REPLACE THIS AFTER DEPLOYING YOUR BACKEND ON RENDER.COM
+  const BACKEND_URL = 'https://YOUR-APP-NAME.onrender.com';
+</script>
+
+<nav>
+  <a href="#" class="logo">
+    <div class="logo-icon">▶</div>
+    <span class="logo-text">Down<span>lynk</span></span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="#how">How it Works</a></li>
+    <li><a href="#platforms">Platforms</a></li>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#desktop" class="nav-cta">Desktop App</a></li>
+  </ul>
+</nav>
+
+<section class="hero">
+  <div class="hero-badge"><span class="badge-dot"></span>FREE · NO SIGNUP · NO ADS</div>
+  <h1><span class="line1">Download</span><br><span class="line2">Anything.</span></h1>
+  <p>Paste any video URL and download instantly. YouTube, Facebook, Instagram, TikTok and more — free forever.</p>
+
+  <div class="video-info" id="videoInfo">
+    <img class="video-thumb" id="videoThumb" src="" alt="thumbnail"/>
+    <div class="video-meta">
+      <div class="video-title" id="videoTitle">Loading...</div>
+      <div class="video-sub" id="videoSub">Fetching info...</div>
+    </div>
+  </div>
+
+  <div class="downloader">
+    <input class="url-input" type="text" id="urlInput" placeholder="Paste video URL here... (YouTube, Instagram, TikTok...)"/>
+    <button class="download-btn" id="downloadBtn" onclick="startDownload()">⬇ Download</button>
+  </div>
+
+  <div class="progress-container" id="progressBox">
+    <div class="progress-label"><span id="progressText">Preparing...</span><span id="progressPct">0%</span></div>
+    <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressBar"></div></div>
+  </div>
+
+  <div class="status-msg" id="statusMsg"></div>
+
+  <div class="hero-stats">
+    <div class="stat"><div class="stat-num">1000+</div><div class="stat-label">SITES SUPPORTED</div></div>
+    <div class="stat"><div class="stat-num">FREE</div><div class="stat-label">FOREVER</div></div>
+    <div class="stat"><div class="stat-num">4K</div><div class="stat-label">MAX QUALITY</div></div>
+  </div>
+</section>
+
+<section class="platforms" id="platforms">
+  <div style="max-width:1100px;margin:0 auto">
+    <div class="section-label">// SUPPORTED PLATFORMS</div>
+    <h2 class="section-title">Works everywhere<br>you watch.</h2>
+    <div class="platforms-grid">
+      <div class="platform-card"><div class="platform-icon">▶️</div><div class="platform-name">YouTube</div><div class="platform-tag">VIDEO + SHORTS</div></div>
+      <div class="platform-card"><div class="platform-icon">📘</div><div class="platform-name">Facebook</div><div class="platform-tag">VIDEO + REELS</div></div>
+      <div class="platform-card"><div class="platform-icon">📸</div><div class="platform-name">Instagram</div><div class="platform-tag">REELS + POSTS</div></div>
+      <div class="platform-card"><div class="platform-icon">🎵</div><div class="platform-name">TikTok</div><div class="platform-tag">VIDEO + AUDIO</div></div>
+      <div class="platform-card"><div class="platform-icon">🐦</div><div class="platform-name">Twitter/X</div><div class="platform-tag">VIDEOS + GIFS</div></div>
+      <div class="platform-card"><div class="platform-icon">🎬</div><div class="platform-name">Vimeo</div><div class="platform-tag">HD VIDEO</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="how" id="how">
+  <div class="section-label">// HOW IT WORKS</div>
+  <h2 class="section-title">Three steps.<br>That's it.</h2>
+  <div class="steps">
+    <div class="step-card"><div class="step-num">01</div><div class="step-title">Paste the URL</div><div class="step-desc">Copy any video link from YouTube, Facebook, Instagram or any supported platform and paste it above.</div></div>
+    <div class="step-card"><div class="step-num">02</div><div class="step-title">Click Download</div><div class="step-desc">Hit the download button. Our server processes the URL and prepares your file instantly at the best quality.</div></div>
+    <div class="step-card"><div class="step-num">03</div><div class="step-title">Save Your File</div><div class="step-desc">Your video downloads directly to your device. No account needed, no watermark, no ads. Just your file.</div></div>
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="features-inner">
+    <div class="section-label">// FEATURES</div>
+    <h2 class="section-title">Everything you need.<br>Nothing you don't.</h2>
+    <div class="features-grid">
+      <div class="feature-card"><div class="feature-icon">⚡</div><div class="feature-content"><h3>Lightning Fast</h3><p>Downloads start instantly. No queues, no waiting. Your file, right now.</p></div></div>
+      <div class="feature-card"><div class="feature-icon">🔒</div><div class="feature-content"><h3>Private & Secure</h3><p>We don't store your URLs or files. Everything is processed and deleted immediately after download.</p></div></div>
+      <div class="feature-card"><div class="feature-icon">🎯</div><div class="feature-content"><h3>Best Quality</h3><p>Automatically selects the best available resolution up to 4K. You always get the highest quality.</p></div></div>
+      <div class="feature-card"><div class="feature-icon">💻</div><div class="feature-content"><h3>Desktop App Available</h3><p>Want more power? Get our Windows app with history, pause/resume, and batch downloads.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="desktop-section" id="desktop">
+  <div class="desktop-card">
+    <div class="desktop-content">
+      <div class="section-label">// DESKTOP APP</div>
+      <h2>Power user?<br>Get the app.</h2>
+      <p>The Downlynk desktop app gives you download history, pause & resume, custom save locations — all on your Windows PC.</p>
+      <div class="desktop-btns">
+        <a href="https://YOUR-ITCH-IO-LINK-HERE" class="btn-primary" target="_blank">⬇ Download for Windows</a>
+        <a href="#how" class="btn-secondary">Learn More</a>
+      </div>
+    </div>
+    <div class="desktop-visual">
+      <div style="font-size:64px">▶</div>
+      <div style="font-size:22px;font-weight:800">Downlynk</div>
+      <div style="font-family:var(--font-mono);font-size:12px;color:var(--muted)">v1.0.0 · Windows</div>
+      <div class="app-size">~53 MB · Free</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-logo">Down<span>lynk</span></div>
+  <div class="footer-note">© 2026 Downlynk · For personal use only</div>
+  <div class="footer-links">
+    <a href="#">Terms</a>
+    <a href="#">Privacy</a>
+    <a href="https://YOUR-ITCH-IO-LINK-HERE" target="_blank">Desktop App</a>
+  </div>
+</footer>
+
+<script>
+let isDownloading = false;
+
+document.getElementById('urlInput').addEventListener('paste', e => {
+  setTimeout(() => fetchVideoInfo(e.target.value.trim()), 100);
+});
+document.getElementById('urlInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') startDownload();
+});
+
+async function fetchVideoInfo(url) {
+  if (!url || !url.startsWith('http')) return;
+  try {
+    const res = await fetch(BACKEND_URL + '/info', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+    const data = await res.json();
+    if (data.title) {
+      document.getElementById('videoTitle').textContent = data.title;
+      document.getElementById('videoSub').textContent = `${data.uploader||''} · ${data.platform||''}`;
+      if (data.thumbnail) document.getElementById('videoThumb').src = data.thumbnail;
+      document.getElementById('videoInfo').classList.add('active');
+    }
+  } catch(e) {}
+}
+
+async function startDownload() {
+  if (isDownloading) return;
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) { setStatus('⚠ Please paste a video URL first.','error'); return; }
+  if (!url.startsWith('http')) { setStatus('⚠ Please enter a valid URL.','error'); return; }
+
+  isDownloading = true;
+  const btn = document.getElementById('downloadBtn');
+  btn.disabled = true; btn.textContent = '⏳ Processing...';
+  document.getElementById('progressBox').classList.add('active');
+  setStatus('','');
+
+  let fake = 0;
+  const fakeTimer = setInterval(() => {
+    if (fake < 80) { fake += Math.random()*7; setProgress(Math.min(fake,80),'Downloading...'); }
+  }, 700);
+
+  try {
+    setProgress(10,'Connecting to server...');
+    const response = await fetch(BACKEND_URL + '/download', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+    clearInterval(fakeTimer);
+    if (!response.ok) { const e = await response.json(); throw new Error(e.error||'Download failed'); }
+    setProgress(95,'Preparing your file...');
+    const disposition = response.headers.get('Content-Disposition');
+    let filename = 'video.mp4';
+    if (disposition?.includes('filename=')) filename = disposition.split('filename=')[1].replace(/"/g,'').trim();
+    const blob = await response.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setProgress(100,'Complete!');
+    setStatus('✓ Download started! Check your downloads folder.','success');
+  } catch(err) {
+    clearInterval(fakeTimer);
+    document.getElementById('progressBox').classList.remove('active');
+    setProgress(0,'');
+    if (err.message.includes('fetch')) setStatus('⚠ Server waking up. Wait 30 seconds and try again.','error');
+    else setStatus('⚠ '+err.message,'error');
+  } finally {
+    isDownloading = false;
+    btn.disabled = false; btn.textContent = '⬇ Download';
+    setTimeout(()=>{ document.getElementById('progressBox').classList.remove('active'); setProgress(0,''); },4000);
+  }
+}
+
+function setProgress(pct,text){
+  document.getElementById('progressBar').style.width=pct+'%';
+  document.getElementById('progressPct').textContent=Math.round(pct)+'%';
+  if(text) document.getElementById('progressText').textContent=text;
+}
+function setStatus(msg,type){
+  const el=document.getElementById('statusMsg');
+  el.textContent=msg; el.className='status-msg'+(type?' '+type:'');
+}
+</script>
+</body>
+</html>
