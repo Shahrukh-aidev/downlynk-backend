@@ -74,12 +74,13 @@ def download_video():
 
     try:
         ydl_opts = {
-            'format': 'best[ext=mp4][filesize<50M]/best[ext=mp4]/best',
+            'format': 'best/bestvideo+bestaudio',
             'outtmpl': output_path + '.%(ext)s',
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
             'socket_timeout': 30,
+            'merge_output_format': 'mp4',
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -103,7 +104,7 @@ def download_video():
             downloaded_file,
             as_attachment=True,
             download_name=f"{safe_title}.{ext}",
-            mimetype='video/mp4'
+            mimetype='application/octet-stream'
         )
 
     except yt_dlp.utils.DownloadError as e:
