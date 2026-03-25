@@ -17,14 +17,13 @@ DOWNLOAD_FOLDER = "downloads"
 COOKIES_FILE = "cookies.txt"
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-# ✅ AUTO-DOWNLOAD FFMPEG FOR RAILWAY/RENDER (fixes 1080p/4K/audio)
+# ========== FFMPEG SETUP ==========
 def setup_ffmpeg():
     """Download static FFmpeg binary if system doesn't have it"""
     ffmpeg_dir = "/tmp/ffmpeg"
     ffmpeg_bin = os.path.join(ffmpeg_dir, "ffmpeg")
     ffprobe_bin = os.path.join(ffmpeg_dir, "ffprobe")
     
-    # If already downloaded, return paths
     if os.path.exists(ffmpeg_bin) and os.path.exists(ffprobe_bin):
         return ffmpeg_bin, ffprobe_bin
     
@@ -32,14 +31,10 @@ def setup_ffmpeg():
     os.makedirs(ffmpeg_dir, exist_ok=True)
     
     try:
-        # Reliable static build for Linux x64
         url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
         tar_path = "/tmp/ffmpeg.tar.xz"
-        
-        # Download
         urllib.request.urlretrieve(url, tar_path)
         
-        # Extract only ffmpeg and ffprobe
         with tarfile.open(tar_path, "r:xz") as tar:
             for member in tar.getmembers():
                 if member.isfile():
@@ -51,11 +46,9 @@ def setup_ffmpeg():
                         tar.extract(member, "/tmp")
                         shutil.move(os.path.join("/tmp", member.name), ffprobe_bin)
         
-        # Make executable
         os.chmod(ffmpeg_bin, 0o755)
         os.chmod(ffprobe_bin, 0o755)
         os.remove(tar_path)
-        
         print(f"✅ FFmpeg ready at: {ffmpeg_bin}")
         return ffmpeg_bin, ffprobe_bin
         
@@ -63,21 +56,70 @@ def setup_ffmpeg():
         print(f"⚠️ FFmpeg download failed: {e}")
         return None, None
 
-# Initialize FFmpeg paths globally
 FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
-# ✅ Write cookies from environment variable on startup
-def setup_cookies():
-    yt_cookies = os.environ.get('YT_COOKIES', '')
-    if yt_cookies and len(yt_cookies) > 10:
-        with open(COOKIES_FILE, 'w') as f:
-            f.write(yt_cookies)
-        print("✅ YouTube cookies loaded from environment")
+# ========== COOKIES DOWNLOAD (GitHub Gist) ==========
+def download_cookies():
+    """
+    Download cookies.txt from GitHub gist using a token.
+    Uses environment variables:
+        GIST_COOKIES_URL : raw URL of the gist (private or public)
+        GITHUB_TOKEN     : GitHub personal access token with 'gist' scope
+    Falls back to YT_COOKIES env var if gist method fails.
+    """
+    gist_url = os.environ.get('GIST_COOKIES_URL', '').strip()
+    token = os.environ.get('GITHUB_TOKEN', '').strip()
+    yt_cookies = os.environ.get('YT_COOKIES', '').strip()
+
+    # Try GitHub gist first (preferred method)
+    if gist_url and token:
+        print("📥 Attempting to download cookies from GitHub gist...")
+        try:
+            # Build request with Authorization header
+            req = urllib.request.Request(gist_url)
+            req.add_header('Authorization', f'token {token}')
+            with urllib.request.urlopen(req, timeout=30) as response:
+                content = response.read().decode('utf-8')
+                if content:
+                    with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    print(f"✅ Cookies downloaded from gist and saved to {COOKIES_FILE}")
+                    return True
+                else:
+                    print("⚠️ Gist returned empty content")
+        except Exception as e:
+            print(f"⚠️ Failed to download cookies from gist: {e}")
     else:
-        print("⚠️ No YouTube cookies found - some videos may be blocked")
+        if not gist_url:
+            print("ℹ️ GIST_COOKIES_URL not set, skipping gist download")
+        elif not token:
+            print("ℹ️ GITHUB_TOKEN not set, cannot access private gist")
 
-setup_cookies()
+    # Fallback to YT_COOKIES environment variable
+    if yt_cookies and len(yt_cookies) > 10:
+        print("📥 Using YT_COOKIES environment variable as fallback")
+        try:
+            with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
+                f.write(yt_cookies)
+            print(f"✅ Cookies saved from YT_COOKIES to {COOKIES_FILE}")
+            return True
+        except Exception as e:
+            print(f"⚠️ Failed to write YT_COOKIES to file: {e}")
+    else:
+        print("⚠️ No cookies found (YT_COOKIES empty)")
 
+    # No cookies available
+    if os.path.exists(COOKIES_FILE):
+        print(f"ℹ️ Using existing cookies file: {COOKIES_FILE}")
+        return True
+    else:
+        print("⚠️ No cookies available – some downloads may fail")
+        return False
+
+# Run the cookie download on startup
+download_cookies()
+
+# ========== YT-DLP SETUP ==========
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -120,7 +162,6 @@ def get_base_opts():
             }
         },
     }
-    # ✅ Use cookies if available
     if os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
     return opts
@@ -128,7 +169,6 @@ def get_base_opts():
 def get_ydl_opts(output_path=None, quality='720p', format_type='video'):
     opts = get_base_opts()
     
-    # ✅ CRITICAL: Tell yt-dlp where to find FFmpeg (fixes 1080p/4K/audio)
     if FFMPEG_PATH and FFPROBE_PATH:
         opts['ffmpeg_location'] = FFMPEG_PATH
         opts['ffprobe_location'] = FFPROBE_PATH
@@ -166,6 +206,7 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video'):
 
     return opts
 
+# ========== ROUTES (unchanged) ==========
 @app.route('/')
 def home():
     cookies_status = "loaded" if os.path.exists(COOKIES_FILE) else "missing"
@@ -247,7 +288,6 @@ def download_video():
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'video')
 
-        # Find downloaded file
         downloaded_file = None
         for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3']:
             candidate = output_path + '.' + ext
@@ -278,7 +318,7 @@ def download_video():
         def generate():
             with open(downloaded_file, 'rb') as f:
                 while True:
-                    chunk = f.read(512 * 1024)  # 512KB chunks
+                    chunk = f.read(512 * 1024)
                     if not chunk:
                         break
                     yield chunk
