@@ -58,66 +58,21 @@ def setup_ffmpeg():
 
 FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
-# ========== COOKIES DOWNLOAD (GitHub Gist) ==========
-def download_cookies():
-    """
-    Download cookies.txt from GitHub gist using a token.
-    Uses environment variables:
-        GIST_COOKIES_URL : raw URL of the gist (private or public)
-        GITHUB_TOKEN     : GitHub personal access token with 'gist' scope
-    Falls back to YT_COOKIES env var if gist method fails.
-    """
-    gist_url = os.environ.get('GIST_COOKIES_URL', '').strip()
-    token = os.environ.get('GITHUB_TOKEN', '').strip()
-    yt_cookies = os.environ.get('YT_COOKIES', '').strip()
-
-    # Try GitHub gist first (preferred method)
-    if gist_url and token:
-        print("📥 Attempting to download cookies from GitHub gist...")
+# ========== COOKIES DOWNLOAD (Secret Gist) ==========
+def setup_cookies():
+    cookies_url = os.environ.get('COOKIES_URL', '')
+    if cookies_url:
         try:
-            # Build request with Authorization header
-            req = urllib.request.Request(gist_url)
-            req.add_header('Authorization', f'token {token}')
-            with urllib.request.urlopen(req, timeout=30) as response:
-                content = response.read().decode('utf-8')
-                if content:
-                    with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    print(f"✅ Cookies downloaded from gist and saved to {COOKIES_FILE}")
-                    return True
-                else:
-                    print("⚠️ Gist returned empty content")
+            print("📥 Downloading cookies from private URL...")
+            urllib.request.urlretrieve(cookies_url, COOKIES_FILE)
+            print("✅ YouTube cookies loaded securely from Gist!")
         except Exception as e:
-            print(f"⚠️ Failed to download cookies from gist: {e}")
+            print(f"⚠️ Failed to download cookies: {e}")
     else:
-        if not gist_url:
-            print("ℹ️ GIST_COOKIES_URL not set, skipping gist download")
-        elif not token:
-            print("ℹ️ GITHUB_TOKEN not set, cannot access private gist")
-
-    # Fallback to YT_COOKIES environment variable
-    if yt_cookies and len(yt_cookies) > 10:
-        print("📥 Using YT_COOKIES environment variable as fallback")
-        try:
-            with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
-                f.write(yt_cookies)
-            print(f"✅ Cookies saved from YT_COOKIES to {COOKIES_FILE}")
-            return True
-        except Exception as e:
-            print(f"⚠️ Failed to write YT_COOKIES to file: {e}")
-    else:
-        print("⚠️ No cookies found (YT_COOKIES empty)")
-
-    # No cookies available
-    if os.path.exists(COOKIES_FILE):
-        print(f"ℹ️ Using existing cookies file: {COOKIES_FILE}")
-        return True
-    else:
-        print("⚠️ No cookies available – some downloads may fail")
-        return False
+        print("⚠️ No COOKIES_URL found - some videos may be blocked")
 
 # Run the cookie download on startup
-download_cookies()
+setup_cookies()
 
 # ========== YT-DLP SETUP ==========
 USER_AGENTS = [
@@ -206,7 +161,7 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video'):
 
     return opts
 
-# ========== ROUTES (unchanged) ==========
+# ========== ROUTES ==========
 @app.route('/')
 def home():
     cookies_status = "loaded" if os.path.exists(COOKIES_FILE) else "missing"
