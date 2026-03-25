@@ -195,25 +195,27 @@ def get_info():
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats', [])
 
-            qualities = set()
+            # ✅ FIXED: Using a list instead of a set to prevent the JSON crash
+            qualities_list = []
             for f in formats:
                 h = f.get('height')
                 if h and f.get('vcodec') != 'none':
-                    if h >= 2160: qualities.add('4k')
-                    elif h >= 1080: qualities.add('1080p')
-                    elif h >= 720: qualities.add('720p')
-                    elif h >= 480: qualities.add('480p')
-                    elif h >= 360: qualities.add('360p')
+                    if h >= 2160 and '4k' not in qualities_list: qualities_list.append('4k')
+                    elif h >= 1080 and '1080p' not in qualities_list: qualities_list.append('1080p')
+                    elif h >= 720 and '720p' not in qualities_list: qualities_list.append('720p')
+                    elif h >= 480 and '480p' not in qualities_list: qualities_list.append('480p')
+                    elif h >= 360 and '360p' not in qualities_list: qualities_list.append('360p')
 
             order = ['4k', '1080p', '720p', '480p', '360p']
-            sorted_qualities = [q for q in order if q in qualities]
+            sorted_qualities = [q for q in order if q in qualities_list]
 
+            # ✅ FIXED: Forced strings/integers to guarantee JSON compatibility
             return jsonify({
-                "title": info.get('title', 'Unknown'),
-                "duration": info.get('duration', 0),
-                "thumbnail": info.get('thumbnail', ''),
-                "uploader": info.get('uploader', 'Unknown'),
-                "platform": info.get('extractor_key', 'Unknown'),
+                "title": str(info.get('title', 'Unknown')),
+                "duration": info.get('duration') or 0,
+                "thumbnail": str(info.get('thumbnail', '') or ''),
+                "uploader": str(info.get('uploader', 'Unknown')),
+                "platform": str(info.get('extractor_key', 'Unknown')),
                 "qualities": sorted_qualities,
                 "has_audio": True,
             })
