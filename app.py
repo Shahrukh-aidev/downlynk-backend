@@ -6,6 +6,9 @@ import uuid
 import threading
 import time
 import random
+import urllib.request
+import tarfile
+import shutil
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -13,6 +16,55 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 DOWNLOAD_FOLDER = "downloads"
 COOKIES_FILE = "cookies.txt"
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+
+# ✅ AUTO-DOWNLOAD FFMPEG FOR RAILWAY/RENDER (fixes 1080p/4K/audio)
+def setup_ffmpeg():
+    """Download static FFmpeg binary if system doesn't have it"""
+    ffmpeg_dir = "/tmp/ffmpeg"
+    ffmpeg_bin = os.path.join(ffmpeg_dir, "ffmpeg")
+    ffprobe_bin = os.path.join(ffmpeg_dir, "ffprobe")
+    
+    # If already downloaded, return paths
+    if os.path.exists(ffmpeg_bin) and os.path.exists(ffprobe_bin):
+        return ffmpeg_bin, ffprobe_bin
+    
+    print("📥 FFmpeg not found in system, downloading static binary...")
+    os.makedirs(ffmpeg_dir, exist_ok=True)
+    
+    try:
+        # Reliable static build for Linux x64
+        url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+        tar_path = "/tmp/ffmpeg.tar.xz"
+        
+        # Download
+        urllib.request.urlretrieve(url, tar_path)
+        
+        # Extract only ffmpeg and ffprobe
+        with tarfile.open(tar_path, "r:xz") as tar:
+            for member in tar.getmembers():
+                if member.isfile():
+                    basename = os.path.basename(member.name)
+                    if basename == "ffmpeg":
+                        tar.extract(member, "/tmp")
+                        shutil.move(os.path.join("/tmp", member.name), ffmpeg_bin)
+                    elif basename == "ffprobe":
+                        tar.extract(member, "/tmp")
+                        shutil.move(os.path.join("/tmp", member.name), ffprobe_bin)
+        
+        # Make executable
+        os.chmod(ffmpeg_bin, 0o755)
+        os.chmod(ffprobe_bin, 0o755)
+        os.remove(tar_path)
+        
+        print(f"✅ FFmpeg ready at: {ffmpeg_bin}")
+        return ffmpeg_bin, ffprobe_bin
+        
+    except Exception as e:
+        print(f"⚠️ FFmpeg download failed: {e}")
+        return None, None
+
+# Initialize FFmpeg paths globally
+FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
 # ✅ Write cookies from environment variable on startup
 def setup_cookies():
@@ -75,6 +127,11 @@ def get_base_opts():
 
 def get_ydl_opts(output_path=None, quality='720p', format_type='video'):
     opts = get_base_opts()
+    
+    # ✅ CRITICAL: Tell yt-dlp where to find FFmpeg (fixes 1080p/4K/audio)
+    if FFMPEG_PATH and FFPROBE_PATH:
+        opts['ffmpeg_location'] = FFMPEG_PATH
+        opts['ffprobe_location'] = FFPROBE_PATH
 
     if format_type == 'audio':
         opts.update({
@@ -112,10 +169,12 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video'):
 @app.route('/')
 def home():
     cookies_status = "loaded" if os.path.exists(COOKIES_FILE) else "missing"
+    ffmpeg_status = "available" if FFMPEG_PATH else "missing"
     return jsonify({
         "status": "Downlynk backend is running!",
-        "version": "3.0.0",
+        "version": "3.0.1",
         "cookies": cookies_status,
+        "ffmpeg": ffmpeg_status,
     })
 
 @app.route('/health')
@@ -229,6 +288,7 @@ def download_video():
             stream_with_context(generate()),
             mimetype=mimetype,
             headers={
+                'Content-Type': 'application/octet-stream',
                 'Content-Disposition': f'attachment; filename="{dl_name}"',
                 'Content-Length': str(file_size),
                 'Access-Control-Allow-Origin': '*',
