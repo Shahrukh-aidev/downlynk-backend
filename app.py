@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import yt_dlp
 import os
@@ -12,13 +12,19 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 DOWNLOAD_FOLDER = "downloads"
 COOKIES_FILE = "cookies.txt"
-# Write cookies from environment variable
-import os
-yt_cookies = os.environ.get('YT_COOKIES', '')
-if yt_cookies and not os.path.exists(COOKIES_FILE):
-    with open(COOKIES_FILE, 'w') as f:
-        f.write(yt_cookies)  # YouTube cookies file
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+
+# ✅ Write cookies from environment variable on startup
+def setup_cookies():
+    yt_cookies = os.environ.get('YT_COOKIES', '')
+    if yt_cookies and len(yt_cookies) > 10:
+        with open(COOKIES_FILE, 'w') as f:
+            f.write(yt_cookies)
+        print("✅ YouTube cookies loaded from environment")
+    else:
+        print("⚠️ No YouTube cookies found - some videos may be blocked")
+
+setup_cookies()
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -33,9 +39,6 @@ def cleanup_file(filepath, delay=300):
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
-                mp3_path = filepath.replace('.m4a', '.mp3').replace('.webm', '.mp3')
-                if os.path.exists(mp3_path) and mp3_path != filepath:
-                    os.remove(mp3_path)
         except: pass
     threading.Thread(target=delete, daemon=True).start()
 
@@ -46,84 +49,73 @@ def add_cors(response):
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
-def get_ydl_opts(output_path=None, quality='best', format_type='video'):
-    user_agent = random.choice(USER_AGENTS)
-    
-    # ✅ CRITICAL FIX: Use iOS client + PoToken bypass
-    common_opts = {
+def get_base_opts():
+    opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'socket_timeout': 60,
         'retries': 10,
         'fragment_retries': 10,
-        'file_access_retries': 5,
         'http_headers': {
-            'User-Agent': user_agent,
-            'Accept': '*/*',
+            'User-Agent': random.choice(USER_AGENTS),
             'Accept-Language': 'en-US,en;q=0.9',
-            'Connection': 'keep-alive',
         },
-        # ✅ KEY FIX: Use iOS client which bypasses most restrictions
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android'],
-                'player_skip': ['webpage', 'config', 'js'],
-                'skip': ['dash', 'hls'],
-            },
+                'player_client': ['ios', 'android', 'web'],
+                'player_skip': ['webpage', 'config'],
+            }
         },
-        'concurrent_fragment_downloads': 4,
     }
-    
-    # Add cookies if file exists
+    # ✅ Use cookies if available
     if os.path.exists(COOKIES_FILE):
-        common_opts['cookiefile'] = COOKIES_FILE
-    
+        opts['cookiefile'] = COOKIES_FILE
+    return opts
+
+def get_ydl_opts(output_path=None, quality='720p', format_type='video'):
+    opts = get_base_opts()
+
     if format_type == 'audio':
-        opts = {
-            **common_opts,
+        opts.update({
             'format': 'bestaudio/best',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-        }
+        })
         if output_path:
             opts['outtmpl'] = output_path + '.%(ext)s'
         return opts
-    
+
     quality_map = {
-        '4k': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
-        '1440p': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
-        '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-        '720p': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-        '480p': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-        '360p': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
-        '240p': 'bestvideo[height<=240]+bestaudio/best[height<=240]',
-        'best': 'bestvideo+bestaudio/best',
-        'medium': 'best[height<=720]',
-        'low': 'best[height<=480]',
+        '4k':    'bestvideo[height<=2160]+bestaudio/best',
+        '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+        '720p':  'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+        '480p':  'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+        '360p':  'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
+        'best':  'bestvideo+bestaudio/best',
     }
-    
-    fmt = quality_map.get(quality, quality_map['best'])
-    
-    opts = {
-        **common_opts,
-        'format': fmt,
+
+    opts.update({
+        'format': quality_map.get(quality, quality_map['720p']),
         'merge_output_format': 'mp4',
-    }
+        'concurrent_fragment_downloads': 4,
+    })
+
     if output_path:
         opts['outtmpl'] = output_path + '.%(ext)s'
-    
+
     return opts
 
 @app.route('/')
 def home():
+    cookies_status = "loaded" if os.path.exists(COOKIES_FILE) else "missing"
     return jsonify({
-        "status": "Downlynk backend is running!", 
-        "version": "2.3.0",
-        "features": ["240p-4K video", "Audio extraction", "YouTube iOS bypass", "Cookie support"]
+        "status": "Downlynk backend is running!",
+        "version": "3.0.0",
+        "cookies": cookies_status,
     })
 
 @app.route('/health')
@@ -134,54 +126,41 @@ def health():
 def get_info():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-    
+
     data = request.get_json()
     url = (data or {}).get('url', '').strip()
-    
     if not url:
         return jsonify({"error": "No URL provided"}), 400
-    
+
     try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
-            'extractor_args': {
-                'youtube': {'player_client': ['ios']},
-            },
-        }
-        
-        if os.path.exists(COOKIES_FILE):
-            ydl_opts['cookiefile'] = COOKIES_FILE
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        opts = get_base_opts()
+        opts['skip_download'] = True
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
             formats = info.get('formats', [])
-            available_qualities = set()
-            
+
+            qualities = set()
             for f in formats:
-                if f.get('vcodec') != 'none' and f.get('height'):
-                    h = f.get('height')
-                    if h >= 2160: available_qualities.add('4k')
-                    elif h >= 1440: available_qualities.add('1440p')
-                    elif h >= 1080: available_qualities.add('1080p')
-                    elif h >= 720: available_qualities.add('720p')
-                    elif h >= 480: available_qualities.add('480p')
-                    elif h >= 360: available_qualities.add('360p')
-                    elif h >= 240: available_qualities.add('240p')
-            
-            has_audio = any(f.get('acodec') != 'none' for f in formats)
-            
+                h = f.get('height')
+                if h and f.get('vcodec') != 'none':
+                    if h >= 2160: qualities.add('4k')
+                    elif h >= 1080: qualities.add('1080p')
+                    elif h >= 720: qualities.add('720p')
+                    elif h >= 480: qualities.add('480p')
+                    elif h >= 360: qualities.add('360p')
+
+            order = ['4k', '1080p', '720p', '480p', '360p']
+            sorted_qualities = [q for q in order if q in qualities]
+
             return jsonify({
                 "title": info.get('title', 'Unknown'),
                 "duration": info.get('duration', 0),
                 "thumbnail": info.get('thumbnail', ''),
                 "uploader": info.get('uploader', 'Unknown'),
                 "platform": info.get('extractor_key', 'Unknown'),
-                "available_qualities": sorted(list(available_qualities), 
-                    key=lambda x: int(x.replace('k', '000').replace('p', '')), reverse=True),
-                "has_audio": has_audio,
+                "qualities": sorted_qualities,
+                "has_audio": True,
             })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -193,44 +172,23 @@ def download_video():
 
     data = request.get_json()
     url = (data or {}).get('url', '').strip()
-    quality = (data or {}).get('quality', 'best')
+    quality = (data or {}).get('quality', '720p')
     format_type = (data or {}).get('format', 'video')
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    valid_qualities = ['4k', '1440p', '1080p', '720p', '480p', '360p', '240p', 'best', 'medium', 'low', 'audio']
-    if quality not in valid_qualities:
-        quality = 'best'
-    
-    if quality == 'audio':
-        format_type = 'audio'
-
     file_id = str(uuid.uuid4())
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
 
     try:
-        max_retries = 3
-        last_error = None
-        
-        for attempt in range(max_retries):
-            try:
-                opts = get_ydl_opts(output_path, quality, format_type)
-                
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    title = info.get('title', 'video')
-                    break
-                    
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-                else:
-                    raise last_error
+        opts = get_ydl_opts(output_path, quality, format_type)
 
-        # Find file
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get('title', 'video')
+
+        # Find downloaded file
         downloaded_file = None
         for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3']:
             candidate = output_path + '.' + ext
@@ -250,29 +208,28 @@ def download_video():
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
         ext = downloaded_file.split('.')[-1]
         file_size = os.path.getsize(downloaded_file)
-        
-        mime_types = {
-            'mp4': 'video/mp4', 'webm': 'video/webm', 'mkv': 'video/x-matroska',
-            'm4a': 'audio/mp4', 'mp3': 'audio/mpeg',
+
+        mime_map = {
+            'mp4': 'video/mp4', 'webm': 'video/webm',
+            'mkv': 'video/x-matroska', 'mp3': 'audio/mpeg', 'm4a': 'audio/mp4'
         }
-        mimetype = mime_types.get(ext, 'application/octet-stream')
-        
-        download_filename = f"{safe_title}.{ext}" if format_type != 'audio' else f"{safe_title}.mp3"
+        mimetype = mime_map.get(ext, 'application/octet-stream')
+        dl_name = f"{safe_title}.{'mp3' if format_type == 'audio' else ext}"
 
         def generate():
             with open(downloaded_file, 'rb') as f:
                 while True:
-                    chunk = f.read(1024 * 512)
+                    chunk = f.read(512 * 1024)  # 512KB chunks
                     if not chunk:
                         break
                     yield chunk
-            cleanup_file(downloaded_file, delay=60 if format_type == 'audio' else 300)
+            cleanup_file(downloaded_file, delay=120)
 
         return Response(
             stream_with_context(generate()),
             mimetype=mimetype,
             headers={
-                'Content-Disposition': f'attachment; filename="{download_filename}"',
+                'Content-Disposition': f'attachment; filename="{dl_name}"',
                 'Content-Length': str(file_size),
                 'Access-Control-Allow-Origin': '*',
             }
@@ -280,24 +237,19 @@ def download_video():
 
     except yt_dlp.utils.DownloadError as e:
         err = str(e)
-        if '403' in err:
-            return jsonify({"error": "YouTube blocked this download. Try: 1) Audio only mode, 2) 720p quality, 3) Different video"}), 400
-        elif 'sign in' in err.lower() or 'login' in err.lower():
-            return jsonify({"error": "This video requires YouTube login. Try a different video."}), 400
-        elif 'not available' in err:
-            return jsonify({"error": "Video not available or is private."}), 400
+        if '403' in err or 'blocked' in err.lower():
+            msg = "YouTube blocked this request. Add YouTube cookies to fix this."
+        elif 'age' in err.lower() or 'sign in' in err.lower():
+            msg = "This video requires age verification. Add YouTube cookies to download it."
+        elif 'private' in err.lower() or 'not available' in err.lower():
+            msg = "This video is private or unavailable."
         elif 'copyright' in err.lower():
-            return jsonify({"error": "Copyright blocked."}), 400
-        elif 'age' in err.lower():
-            return jsonify({"error": "Age-restricted video."}), 400
+            msg = "This video is blocked due to copyright."
         else:
-            return jsonify({"error": f"Download failed: {err}"}), 400
+            msg = f"Download failed: {err[:200]}"
+        return jsonify({"error": msg}), 400
     except Exception as e:
-        return jsonify({"error": f"Server error: {str(e)}"}), 500
-
-@app.route('/app')
-def serve_frontend():
-    return send_from_directory('.', 'index.html')
+        return jsonify({"error": f"Server error: {str(e)[:200]}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
