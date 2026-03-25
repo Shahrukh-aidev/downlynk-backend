@@ -112,12 +112,15 @@ def get_base_opts():
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android', 'web'],
+                # 🚨 THE FIX: Force yt-dlp to pretend it is an Android/iOS app
+                'player_client': ['android', 'ios', 'tv', 'web'],
                 'player_skip': ['webpage', 'config'],
             }
         },
     }
-    if os.path.exists(COOKIES_FILE):
+    if os.path.exists('cookies.txt'):
+        opts['cookiefile'] = 'cookies.txt'
+    elif os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
     return opts
 
@@ -195,7 +198,6 @@ def get_info():
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats', [])
 
-            # ✅ FIXED: Using a list instead of a set to prevent the JSON crash
             qualities_list = []
             for f in formats:
                 h = f.get('height')
@@ -209,7 +211,6 @@ def get_info():
             order = ['4k', '1080p', '720p', '480p', '360p']
             sorted_qualities = [q for q in order if q in qualities_list]
 
-            # ✅ FIXED: Forced strings/integers to guarantee JSON compatibility
             return jsonify({
                 "title": str(info.get('title', 'Unknown')),
                 "duration": info.get('duration') or 0,
@@ -295,9 +296,9 @@ def download_video():
     except yt_dlp.utils.DownloadError as e:
         err = str(e)
         if '403' in err or 'blocked' in err.lower():
-            msg = "YouTube blocked this request. Add YouTube cookies to fix this."
+            msg = "YouTube blocked this request. Update YouTube cookies to fix this."
         elif 'age' in err.lower() or 'sign in' in err.lower():
-            msg = "This video requires age verification. Add YouTube cookies to download it."
+            msg = "This video requires age verification. Update YouTube cookies to download it."
         elif 'private' in err.lower() or 'not available' in err.lower():
             msg = "This video is private or unavailable."
         elif 'copyright' in err.lower():
