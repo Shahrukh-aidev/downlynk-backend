@@ -11,9 +11,9 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 DOWNLOAD_FOLDER = "downloads"
+COOKIES_FILE = "cookies.txt"  # YouTube cookies file
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-# List of user agents to rotate
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -43,7 +43,7 @@ def add_cors(response):
 def get_ydl_opts(output_path=None, quality='best', format_type='video'):
     user_agent = random.choice(USER_AGENTS)
     
-    # Common options for all requests
+    # ✅ CRITICAL FIX: Use iOS client + PoToken bypass
     common_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -54,31 +54,29 @@ def get_ydl_opts(output_path=None, quality='best', format_type='video'):
         'file_access_retries': 5,
         'http_headers': {
             'User-Agent': user_agent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0',
         },
-        # ✅ CRITICAL: Use more extractor options to bypass blocks
+        # ✅ KEY FIX: Use iOS client which bypasses most restrictions
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web'],
+                'player_client': ['ios', 'android'],
                 'player_skip': ['webpage', 'config', 'js'],
+                'skip': ['dash', 'hls'],
             },
         },
         'concurrent_fragment_downloads': 4,
     }
     
-    # Audio-only format
+    # Add cookies if file exists
+    if os.path.exists(COOKIES_FILE):
+        common_opts['cookiefile'] = COOKIES_FILE
+    
     if format_type == 'audio':
         opts = {
             **common_opts,
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+            'format': 'bestaudio/best',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -89,7 +87,6 @@ def get_ydl_opts(output_path=None, quality='best', format_type='video'):
             opts['outtmpl'] = output_path + '.%(ext)s'
         return opts
     
-    # Video quality map
     quality_map = {
         '4k': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
         '1440p': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
@@ -99,8 +96,8 @@ def get_ydl_opts(output_path=None, quality='best', format_type='video'):
         '360p': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
         '240p': 'bestvideo[height<=240]+bestaudio/best[height<=240]',
         'best': 'bestvideo+bestaudio/best',
-        'medium': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-        'low': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+        'medium': 'best[height<=720]',
+        'low': 'best[height<=480]',
     }
     
     fmt = quality_map.get(quality, quality_map['best'])
@@ -119,8 +116,8 @@ def get_ydl_opts(output_path=None, quality='best', format_type='video'):
 def home():
     return jsonify({
         "status": "Downlynk backend is running!", 
-        "version": "2.2.0",
-        "features": ["240p-4K video", "Audio extraction", "1000+ sites", "YouTube 403 fix"]
+        "version": "2.3.0",
+        "features": ["240p-4K video", "Audio extraction", "YouTube iOS bypass", "Cookie support"]
     })
 
 @app.route('/health')
@@ -139,20 +136,17 @@ def get_info():
         return jsonify({"error": "No URL provided"}), 400
     
     try:
-        # Use simpler options for info extraction
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': False,
-            'http_headers': {
-                'User-Agent': random.choice(USER_AGENTS),
-            },
+            'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
             'extractor_args': {
-                'youtube': {
-                    'player_client': ['android'],
-                },
+                'youtube': {'player_client': ['ios']},
             },
         }
+        
+        if os.path.exists(COOKIES_FILE):
+            ydl_opts['cookiefile'] = COOKIES_FILE
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -210,7 +204,6 @@ def download_video():
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
 
     try:
-        # ✅ Try multiple times with different user agents if failed
         max_retries = 3
         last_error = None
         
@@ -221,17 +214,17 @@ def download_video():
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=True)
                     title = info.get('title', 'video')
-                    break  # Success, exit retry loop
+                    break
                     
             except Exception as e:
                 last_error = e
                 if attempt < max_retries - 1:
-                    time.sleep(1)  # Wait before retry
+                    time.sleep(2)
                     continue
                 else:
                     raise last_error
 
-        # Find downloaded file
+        # Find file
         downloaded_file = None
         for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3']:
             candidate = output_path + '.' + ext
@@ -240,7 +233,6 @@ def download_video():
                 break
 
         if not downloaded_file:
-            # Search for any matching file
             for f in os.listdir(DOWNLOAD_FOLDER):
                 if f.startswith(file_id):
                     downloaded_file = os.path.join(DOWNLOAD_FOLDER, f)
@@ -249,7 +241,6 @@ def download_video():
         if not downloaded_file:
             return jsonify({"error": "File not found after download"}), 500
 
-        # Prepare response
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
         ext = downloaded_file.split('.')[-1]
         file_size = os.path.getsize(downloaded_file)
@@ -283,22 +274,21 @@ def download_video():
 
     except yt_dlp.utils.DownloadError as e:
         err = str(e)
-        if '403' in err or 'Forbidden' in err:
-            return jsonify({"error": "YouTube is blocking this download. Try a different video or quality setting."}), 400
+        if '403' in err:
+            return jsonify({"error": "YouTube blocked this download. Try: 1) Audio only mode, 2) 720p quality, 3) Different video"}), 400
         elif 'sign in' in err.lower() or 'login' in err.lower():
-            return jsonify({"error": "This video requires login. Try a different URL."}), 400
-        elif 'not available' in err or 'Private video' in err:
-            return jsonify({"error": "This video is not available or is private."}), 400
+            return jsonify({"error": "This video requires YouTube login. Try a different video."}), 400
+        elif 'not available' in err:
+            return jsonify({"error": "Video not available or is private."}), 400
         elif 'copyright' in err.lower():
-            return jsonify({"error": "This video cannot be downloaded due to copyright."}), 400
+            return jsonify({"error": "Copyright blocked."}), 400
         elif 'age' in err.lower():
-            return jsonify({"error": "This video is age-restricted."}), 400
+            return jsonify({"error": "Age-restricted video."}), 400
         else:
             return jsonify({"error": f"Download failed: {err}"}), 400
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
-# Serve frontend from backend (optional)
 @app.route('/app')
 def serve_frontend():
     return send_from_directory('.', 'index.html')
