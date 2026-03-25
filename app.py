@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import yt_dlp
 import os
@@ -7,10 +7,11 @@ import threading
 import time
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
 
 DOWNLOAD_FOLDER = "downloads"
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+
 
 def cleanup_file(filepath, delay=300):
     def delete():
@@ -18,70 +19,65 @@ def cleanup_file(filepath, delay=300):
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
-        except: pass
+        except:
+            pass
     threading.Thread(target=delete, daemon=True).start()
 
-@app.after_request
-def add_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
-
-def get_ydl_opts(output_path=None, quality='best'):
-    # ✅ Quality selector
-    if quality == 'best':
-        fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
-    elif quality == 'medium':
-        fmt = 'bestvideo[height<=720][ext=mp4]+bestaudio/best[height<=720]'
-    elif quality == 'low':
-        fmt = 'bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]'
-    else:
-        fmt = 'best'
-
-    opts = {
-        'format': fmt,
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'socket_timeout': 60,
-        'retries': 10,
-        'fragment_retries': 10,
-        'file_access_retries': 5,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-        # ✅ Fixes YouTube + TikTok + Instagram
-        'extractor_args': {
-            'youtube': {'player_client': ['android', 'web']},
-        },
-        'merge_output_format': 'mp4',
-        # ✅ Speed boost
-        'concurrent_fragment_downloads': 4,
-    }
-    if output_path:
-        opts['outtmpl'] = output_path + '.%(ext)s'
-    return opts
 
 @app.route('/')
 def home():
-    return jsonify({"status": "Downlynk backend is running!", "version": "2.0.0"})
+    return jsonify({"status": "Downlynk backend is running!", "version": "1.0.1"})
+
 
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
 
-@app.route('/info', methods=['POST', 'OPTIONS'])
+
+# 🔥 COMMON YTDLP SETTINGS (reused)
+def get_ydl_opts(output_path=None):
+    return {
+        'format': 'bv*+ba/b',  # fallback-safe
+        'outtmpl': output_path + '.%(ext)s' if output_path else None,
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'socket_timeout': 30,
+        'retries': 10,
+        'fragment_retries': 10,
+        'sleep_interval': 2,
+
+        # 🧠 Pretend you're human
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        },
+
+        # 🔥 Modern YouTube fix
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
+        },
+
+        # 🔐 OPTIONAL (add cookies.txt if you have it)
+        # 'cookiefile': 'cookies.txt',
+
+        'merge_output_format': 'mp4',
+    }
+
+
+@app.route('/info', methods=['POST'])
 def get_info():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
     data = request.get_json()
     url = (data or {}).get('url', '').strip()
+
     if not url:
         return jsonify({"error": "No URL provided"}), 400
+
     try:
         with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
+
             return jsonify({
                 "title": info.get('title', 'Unknown'),
                 "duration": info.get('duration', 0),
@@ -89,17 +85,15 @@ def get_info():
                 "uploader": info.get('uploader', 'Unknown'),
                 "platform": info.get('extractor_key', 'Unknown'),
             })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route('/download', methods=['POST', 'OPTIONS'])
-def download_video():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
 
+@app.route('/download', methods=['POST'])
+def download_video():
     data = request.get_json()
     url = (data or {}).get('url', '').strip()
-    quality = (data or {}).get('quality', 'best')  # ✅ quality from frontend
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
@@ -108,65 +102,42 @@ def download_video():
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
 
     try:
-        with yt_dlp.YoutubeDL(get_ydl_opts(output_path, quality)) as ydl:
+        ydl_opts = get_ydl_opts(output_path)
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'video')
 
-        # Find downloaded file
+        # find file
         downloaded_file = None
-        for ext in ['mp4', 'webm', 'mkv', 'avi', 'mov', 'm4a']:
+        for ext in ['mp4', 'webm', 'mkv', 'avi', 'mov']:
             candidate = output_path + '.' + ext
             if os.path.exists(candidate):
                 downloaded_file = candidate
                 break
 
         if not downloaded_file:
-            for f in os.listdir(DOWNLOAD_FOLDER):
-                if f.startswith(file_id):
-                    downloaded_file = os.path.join(DOWNLOAD_FOLDER, f)
-                    break
+            return jsonify({"error": "Download failed — file not found"}), 500
 
-        if not downloaded_file:
-            return jsonify({"error": "File not found after download"}), 500
+        cleanup_file(downloaded_file)
 
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
         ext = downloaded_file.split('.')[-1]
-        file_size = os.path.getsize(downloaded_file)
 
-        # ✅ Chunked streaming — fixes connection reset
-        def generate():
-            with open(downloaded_file, 'rb') as f:
-                while True:
-                    chunk = f.read(1024 * 512)  # 512KB chunks
-                    if not chunk:
-                        break
-                    yield chunk
-            cleanup_file(downloaded_file, delay=60)
-
-        return Response(
-            stream_with_context(generate()),
-            mimetype='application/octet-stream',
-            headers={
-                'Content-Disposition': f'attachment; filename="{safe_title}.{ext}"',
-                'Content-Length': str(file_size),
-                'Access-Control-Allow-Origin': '*',
-            }
+        return send_file(
+            downloaded_file,
+            as_attachment=True,
+            download_name=f"{safe_title}.{ext}",
+            mimetype='application/octet-stream'
         )
 
     except yt_dlp.utils.DownloadError as e:
-        err = str(e)
-        # ✅ Friendly error messages
-        if 'not available' in err:
-            return jsonify({"error": "This video is not available or is private."}), 400
-        elif 'copyright' in err.lower():
-            return jsonify({"error": "This video cannot be downloaded due to copyright."}), 400
-        elif 'age' in err.lower():
-            return jsonify({"error": "This video is age-restricted."}), 400
-        else:
-            return jsonify({"error": f"Download failed: {err}"}), 400
+        return jsonify({"error": f"Download failed: {str(e)}"}), 400
+
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
