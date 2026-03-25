@@ -36,10 +36,13 @@
   .video-meta{text-align:left;flex:1;overflow:hidden}
   .video-title{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .video-sub{font-size:12px;color:var(--muted);font-family:var(--font-mono);margin-top:4px}
-  .downloader{width:100%;max-width:680px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:8px;display:flex;gap:8px;margin-bottom:16px;animation:fadeInDown .6s ease .3s both;position:relative;z-index:1}
+  .downloader{width:100%;max-width:680px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:8px;display:flex;gap:8px;margin-bottom:16px;animation:fadeInDown .6s ease .3s both;position:relative;z-index:1;flex-wrap:wrap}
   .downloader::before{content:'';position:absolute;inset:-1px;border-radius:21px;background:linear-gradient(135deg,rgba(0,229,255,.3),rgba(0,255,136,.1),transparent);z-index:-1}
-  .url-input{flex:1;background:transparent;border:none;outline:none;color:var(--text);font-family:var(--font-mono);font-size:14px;padding:14px 20px;caret-color:var(--cyan)}
+  .url-input{flex:1;min-width:200px;background:transparent;border:none;outline:none;color:var(--text);font-family:var(--font-mono);font-size:14px;padding:14px 20px;caret-color:var(--cyan)}
   .url-input::placeholder{color:var(--muted)}
+  /* ✅ NEW: Quality selector */
+  .quality-select{background:var(--bg);color:var(--muted);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-family:var(--font-mono);font-size:12px;outline:none;cursor:pointer;transition:all .2s}
+  .quality-select:hover{border-color:var(--cyan);color:var(--cyan)}
   .download-btn{background:linear-gradient(135deg,var(--cyan),var(--green));color:var(--bg);border:none;padding:14px 28px;border-radius:14px;font-family:var(--font-display);font-size:14px;font-weight:700;cursor:pointer;transition:all .2s;white-space:nowrap}
   .download-btn:hover{transform:scale(1.03);box-shadow:0 0 30px rgba(0,229,255,.3)}
   .download-btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
@@ -111,7 +114,6 @@
 <body>
 
 <script>
-  // ⚠️ REPLACE THIS AFTER DEPLOYING YOUR BACKEND ON RENDER.COM
   const BACKEND_URL = 'https://downlynk-backend-production-223e.up.railway.app';
 </script>
 
@@ -143,6 +145,12 @@
 
   <div class="downloader">
     <input class="url-input" type="text" id="urlInput" placeholder="Paste video URL here... (YouTube, Instagram, TikTok...)"/>
+    <!-- ✅ NEW: Quality selector -->
+    <select class="quality-select" id="qualitySelect">
+      <option value="best">🎯 Best</option>
+      <option value="medium">📺 720p</option>
+      <option value="low">⚡ 480p Fast</option>
+    </select>
     <button class="download-btn" id="downloadBtn" onclick="startDownload()">⬇ Download</button>
   </div>
 
@@ -205,7 +213,7 @@
       <h2>Power user?<br>Get the app.</h2>
       <p>The Downlynk desktop app gives you download history, pause & resume, custom save locations — all on your Windows PC.</p>
       <div class="desktop-btns">
-        <a href="https://YOUR-ITCH-IO-LINK-HERE" class="btn-primary" target="_blank">⬇ Download for Windows</a>
+        <a href="#" class="btn-primary" target="_blank">⬇ Download for Windows</a>
         <a href="#how" class="btn-secondary">Learn More</a>
       </div>
     </div>
@@ -224,7 +232,7 @@
   <div class="footer-links">
     <a href="#">Terms</a>
     <a href="#">Privacy</a>
-    <a href="https://YOUR-ITCH-IO-LINK-HERE" target="_blank">Desktop App</a>
+    <a href="#">Desktop App</a>
   </div>
 </footer>
 
@@ -259,6 +267,9 @@ async function fetchVideoInfo(url) {
 async function startDownload() {
   if (isDownloading) return;
   const url = document.getElementById('urlInput').value.trim();
+  // ✅ Get selected quality
+  const quality = document.getElementById('qualitySelect').value;
+
   if (!url) { setStatus('⚠ Please paste a video URL first.','error'); return; }
   if (!url.startsWith('http')) { setStatus('⚠ Please enter a valid URL.','error'); return; }
 
@@ -278,7 +289,8 @@ async function startDownload() {
     const response = await fetch(BACKEND_URL + '/download', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({url})
+      // ✅ Send quality to backend
+      body: JSON.stringify({url, quality})
     });
     clearInterval(fakeTimer);
     if (!response.ok) { const e = await response.json(); throw new Error(e.error||'Download failed'); }
