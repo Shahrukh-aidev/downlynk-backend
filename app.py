@@ -11,7 +11,13 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 DOWNLOAD_FOLDER = "downloads"
-COOKIES_FILE = "cookies.txt"  # YouTube cookies file
+COOKIES_FILE = "cookies.txt"
+# Write cookies from environment variable
+import os
+yt_cookies = os.environ.get('YT_COOKIES', '')
+if yt_cookies and not os.path.exists(COOKIES_FILE):
+    with open(COOKIES_FILE, 'w') as f:
+        f.write(yt_cookies)  # YouTube cookies file
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 USER_AGENTS = [
