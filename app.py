@@ -17,7 +17,6 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Railway requires /tmp for write access
 DOWNLOAD_FOLDER = "/tmp/downloads"
 PROGRESS_DIR = "/tmp/progress" 
 COOKIES_FILE = "/tmp/cookies.txt"
@@ -25,18 +24,15 @@ COOKIES_FILE = "/tmp/cookies.txt"
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROGRESS_DIR, exist_ok=True)
 
-# ========== FILE-BASED PROGRESS (Required for Railway multi-worker) ==========
 def save_progress(file_id, data):
-    """Save progress to shared file system"""
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
         with open(filepath, 'w') as f:
             json.dump({**data, "timestamp": time.time()}, f)
-    except Exception as e:
-        print(f"Progress save error: {e}")
+    except:
+        pass
 
 def load_progress(file_id):
-    """Load progress from file (works across all workers)"""
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
         if os.path.exists(filepath):
@@ -60,20 +56,17 @@ def delete_progress(file_id):
         pass
 
 def clean_ansi(text):
-    """Remove color codes from yt-dlp output"""
     if not text:
         return "0%"
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return ansi_escape.sub('', str(text))
 
 def progress_hook(d, file_id):
-    """Real-time progress capture"""
     try:
         if d['status'] == 'downloading':
             percent = clean_ansi(d.get('_percent_str', '0%')).strip()
             speed = clean_ansi(d.get('_speed_str', 'Unknown')).strip()
             eta = clean_ansi(d.get('_eta_str', 'Unknown')).strip()
-            
             save_progress(file_id, {
                 "status": "Downloading...",
                 "percent": percent,
@@ -87,10 +80,9 @@ def progress_hook(d, file_id):
                 "speed": "0 B/s",
                 "eta": "00:00"
             })
-    except Exception as e:
-        print(f"Hook error: {e}")
+    except:
+        pass
 
-# ========== FFMPEG SETUP ==========
 def setup_ffmpeg():
     ffmpeg_dir = "/tmp/ffmpeg"
     ffmpeg_bin = os.path.join(ffmpeg_dir, "ffmpeg")
@@ -130,30 +122,17 @@ def setup_ffmpeg():
 
 FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
-# ========== COOKIES SETUP ==========
 def setup_cookies():
-    # Try env var first (Railway Secret)
     yt_cookies = os.environ.get('YT_COOKIES', '')
     if yt_cookies and len(yt_cookies) > 50:
         try:
             with open(COOKIES_FILE, 'w') as f:
                 f.write(yt_cookies)
-            print("✅ Cookies from env")
+            print("✅ Cookies loaded")
             return
         except:
             pass
     
-    # Try URL
-    cookies_url = os.environ.get('COOKIES_URL', '')
-    if cookies_url:
-        try:
-            urllib.request.urlretrieve(cookies_url, COOKIES_FILE)
-            print("✅ Cookies from URL")
-            return
-        except:
-            pass
-    
-    # Fallback to local file
     if os.path.exists("cookies.txt"):
         try:
             shutil.copy("cookies.txt", COOKIES_FILE)
@@ -161,8 +140,6 @@ def setup_cookies():
             return
         except:
             pass
-    
-    print("⚠️ No cookies")
 
 setup_cookies()
 
@@ -190,9 +167,10 @@ def add_cors(response):
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
-def get_base_opts(referer_url=None):
+def get_base_opts(referer_url=None, force_generic=False):
     """
-    Universal extractor options - supports YouTube, movies, any site
+    Universal extractor options
+    force_generic=True bypasses broken site-specific extractors (fixes Facebook)
     """
     headers = {
         'User-Agent': random.choice(USER_AGENTS),
@@ -208,7 +186,6 @@ def get_base_opts(referer_url=None):
         'Cache-Control': 'no-cache',
     }
     
-    # Set referer for movie sites (crucial for hindimovies.to, etc)
     if referer_url:
         try:
             parsed = urllib.parse.urlparse(referer_url)
@@ -221,15 +198,28 @@ def get_base_opts(referer_url=None):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'socket_timeout': 120,  # Longer for slow movie servers
+        'socket_timeout': 120,
         'retries': 20,
         'fragment_retries': 20,
         'skip_unavailable_fragments': True,
         'http_headers': headers,
         'geo_bypass': True,
-        'geo_bypass_country': 'US',
-        # CRITICAL: Enable generic extractor for unknown sites
-        'extractor_args': {
+    }
+    
+    if os.path.exists(COOKIES_FILE):
+        opts['cookiefile'] = COOKIES_FILE
+    
+    # If force_generic, only use generic extractor (bypasses broken Facebook parser)
+    if force_generic:
+        opts['extractor_args'] = {
+            'generic': {
+                'hls': True,
+                'dash': True,
+                'pcm': True,
+            }
+        }
+    else:
+        opts['extractor_args'] = {
             'generic': {
                 'hls': True,
                 'dash': True,
@@ -239,16 +229,12 @@ def get_base_opts(referer_url=None):
                 'player_client': ['android', 'ios', 'web'],
                 'player_skip': ['webpage', 'config'],
             }
-        },
-    }
-    
-    if os.path.exists(COOKIES_FILE):
-        opts['cookiefile'] = COOKIES_FILE
+        }
         
     return opts
 
-def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=None, referer_url=None):
-    opts = get_base_opts(referer_url)
+def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=None, referer_url=None, force_generic=False):
+    opts = get_base_opts(referer_url, force_generic)
     
     if file_id:
         opts['progress_hooks'] = [lambda d: progress_hook(d, file_id)]
@@ -270,14 +256,12 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=
             opts['outtmpl'] = output_path + '.%(ext)s'
         return opts
 
-    # Universal quality selection
     quality_map = {
         '4k':    'bestvideo[height<=2160]+bestaudio/best',
         '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
         '720p':  'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
         '480p':  'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
         '360p':  'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
-        '240p':  'bestvideo[height<=240]+bestaudio/best[height<=240]/best',
         'best':  'bestvideo+bestaudio/best',
     }
 
@@ -294,9 +278,8 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=
 def home():
     return jsonify({
         "status": "Universal Downloader Ready",
-        "version": "5.0.0",
-        "capabilities": "All Sites (YouTube, Movies, TV, Any URL)",
-        "ffmpeg": "available" if FFMPEG_PATH else "missing"
+        "version": "5.1.0",
+        "facebook_fix": "enabled"
     })
 
 @app.route('/health')
@@ -317,12 +300,26 @@ def get_info():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
+    is_facebook = 'facebook.com' in url or 'fb.watch' in url
+    
     try:
-        opts = get_base_opts(referer_url=url)
+        # Try normal extraction first
+        opts = get_base_opts(referer_url=url, force_generic=False)
         opts['skip_download'] = True
 
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            try:
+                info = ydl.extract_info(url, download=False)
+            except Exception as e:
+                # If Facebook fails with parse error, use generic extractor
+                if is_facebook and ('Cannot parse data' in str(e) or 'parse' in str(e).lower()):
+                    print(f"⚠️ Facebook parser failed, retrying generic for: {url}")
+                    opts = get_base_opts(referer_url=url, force_generic=True)
+                    opts['skip_download'] = True
+                    ydl = yt_dlp.YoutubeDL(opts)
+                    info = ydl.extract_info(url, download=False)
+                else:
+                    raise e
             
             if not info:
                 raise Exception("No video found")
@@ -338,13 +335,11 @@ def get_info():
                     elif h >= 720: qualities_set.add('720p')
                     elif h >= 480: qualities_set.add('480p')
                     elif h >= 360: qualities_set.add('360p')
-                    elif h >= 240: qualities_set.add('240p')
 
-            # For generic sites with no format info, assume standard qualities
             if not qualities_set:
                 qualities_set = {'720p', '480p', '360p'}
 
-            order = ['4k', '1080p', '720p', '480p', '360p', '240p']
+            order = ['4k', '1080p', '720p', '480p', '360p']
             sorted_qualities = [q for q in order if q in qualities_set]
 
             return jsonify({
@@ -352,7 +347,7 @@ def get_info():
                 "duration": info.get('duration') or 0,
                 "thumbnail": str(info.get('thumbnail', '')),
                 "uploader": str(info.get('uploader', 'Unknown')),
-                "platform": str(info.get('extractor_key', 'Universal')),
+                "platform": 'Facebook' if is_facebook else str(info.get('extractor_key', 'Universal')),
                 "qualities": sorted_qualities,
                 "has_audio": True
             })
@@ -380,6 +375,7 @@ def download_video():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
+    is_facebook = 'facebook.com' in url or 'fb.watch' in url
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
     
     save_progress(file_id, {
@@ -390,13 +386,31 @@ def download_video():
     })
 
     try:
-        opts = get_ydl_opts(output_path, quality, format_type, file_id, referer_url=url)
+        # Try normal extraction first
+        try:
+            opts = get_ydl_opts(output_path, quality, format_type, file_id, referer_url=url, force_generic=False)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+        except Exception as e:
+            # Retry with generic for Facebook parse errors
+            if is_facebook and ('Cannot parse data' in str(e) or 'parse' in str(e).lower()):
+                print(f"⚠️ Facebook download failed, retrying generic...")
+                save_progress(file_id, {
+                    "status": "Retrying Facebook method...",
+                    "percent": "5%",
+                    "speed": "0 B/s",
+                    "eta": "Unknown"
+                })
+                opts = get_ydl_opts(output_path, quality, format_type, file_id, referer_url=url, force_generic=True)
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            else:
+                raise e
+        
+        if not info:
+            raise Exception("Download failed")
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if not info:
-                raise Exception("Download failed")
-            title = info.get('title', 'video')
+        title = info.get('title', 'video')
 
         # Find file
         downloaded_file = None
@@ -457,18 +471,16 @@ def download_video():
         err = str(e)
         msg = "Download failed"
         
-        if 'Unsupported URL' in err:
-            msg = "❌ Site not supported. Uses DRM or custom player."
+        if 'Cannot parse data' in err and is_facebook:
+            msg = "❌ Facebook blocked this video. Try: 1) Use fb.watch short link, 2) Make video public, 3) Wait 5 minutes"
+        elif 'Unsupported URL' in err:
+            msg = "❌ Site not supported"
         elif '403' in err:
-            msg = "❌ Access blocked (403). Site uses bot protection."
-        elif 'DRM' in err or 'drm' in err:
-            msg = "❌ DRM protected (Netflix, Prime, etc). Cannot download."
-        elif '404' in err:
-            msg = "❌ Video not found. URL may be expired."
-        elif 'sign in' in err.lower() or 'login' in err.lower():
-            msg = "❌ Requires login. Try adding cookies in Railway dashboard."
+            msg = "❌ Access blocked (403)"
+        elif 'private' in err.lower():
+            msg = "❌ Private video"
         else:
-            msg = f"❌ Error: {err[:150]}"
+            msg = f"❌ {err[:150]}"
         
         delete_progress(file_id)
         return jsonify({"error": msg}), 400
