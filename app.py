@@ -160,48 +160,103 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
-# ------------------------ Facebook Manual Extraction ------------------------
+# ------------------------ Cookie Helper for Requests ------------------------
+def get_cookies_for_requests():
+    """Load cookies from Netscape format file into a requests cookie jar."""
+    cookies_jar = requests.cookies.RequestsCookieJar()
+    if not os.path.exists(COOKIES_FILE):
+        return cookies_jar
+    try:
+        with open(COOKIES_FILE, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('#') or not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 7:
+                    domain, domain_specified, path, secure, expires, name, value = parts[:7]
+                    cookies_jar.set(name, value, domain=domain, path=path, secure=(secure == 'TRUE'))
+    except Exception as e:
+        logger.error(f"Error loading cookies for requests: {e}")
+    return cookies_jar
+
+# ------------------------ Improved Facebook Manual Extraction ------------------------
 def extract_facebook_video_url(reel_url):
     """
-    Attempt to extract the direct video URL from a Facebook Reel/Video page.
-    Returns a direct video URL or None.
+    Attempt to extract a direct video URL from a Facebook Reel/Video page.
+    Uses cookies and multiple methods.
     """
     try:
+        session = requests.Session()
+        session.cookies = get_cookies_for_requests()
+        
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         }
-        resp = requests.get(reel_url, headers=headers, timeout=15)
+        
+        # Try original URL
+        resp = session.get(reel_url, headers=headers, timeout=15)
         if resp.status_code != 200:
-            logger.info(f"Facebook page fetch failed: {resp.status_code}")
-            return None
-
+            # Try mobile version
+            mobile_url = reel_url.replace('www.facebook.com', 'm.facebook.com')
+            resp = session.get(mobile_url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                logger.info(f"Facebook page fetch failed: {resp.status_code}")
+                return None
+        
         soup = BeautifulSoup(resp.text, 'html.parser')
-
-        # 1. Look for og:video meta tag
+        
+        # Method 1: og:video
         meta = soup.find('meta', property='og:video')
         if meta and meta.get('content'):
             return meta['content']
-
-        # 2. Look for video tag with src
+        
+        # Method 2: og:video:url
+        meta = soup.find('meta', property='og:video:url')
+        if meta and meta.get('content'):
+            return meta['content']
+        
+        # Method 3: <video> tag
         video_tag = soup.find('video')
         if video_tag and video_tag.get('src'):
             return video_tag['src']
-
-        # 3. Look for script containing "video_url" (common in Facebook)
+        
+        # Method 4: Search scripts for video URLs
         scripts = soup.find_all('script')
         for script in scripts:
-            if script.string and 'video_url' in script.string:
-                # Try to extract URL using regex
-                match = re.search(r'"video_url":"([^"]+)"', script.string)
-                if match:
-                    url = match.group(1).replace('\\/', '/')
-                    return url
-
+            if not script.string:
+                continue
+            # Look for "playable_url"
+            match = re.search(r'"playable_url"\s*:\s*"([^"]+)"', script.string)
+            if match:
+                return match.group(1).replace('\\/', '/')
+            # Look for "browser_native_hd_url"
+            match = re.search(r'"browser_native_hd_url"\s*:\s*"([^"]+)"', script.string)
+            if match:
+                return match.group(1).replace('\\/', '/')
+            # Look for "browser_native_sd_url"
+            match = re.search(r'"browser_native_sd_url"\s*:\s*"([^"]+)"', script.string)
+            if match:
+                return match.group(1).replace('\\/', '/')
+            # Look for any .mp4 URL
+            match = re.search(r'(https?://[^"\']+\.mp4)', script.string)
+            if match:
+                return match.group(1)
+        
         logger.info("No direct video URL found in page")
         return None
-
+        
     except Exception as e:
         logger.error(f"Facebook extraction error: {e}")
         return None
@@ -256,7 +311,7 @@ def get_base_opts(referer_url=None, force_generic=False):
         'http_headers': headers,
         'geo_bypass': True,
         'nocheckcertificate': True,
-        'cookiesfrombrowser': None,  # Don't try to use browser cookies
+        'cookiesfrombrowser': None,
     }
 
     if os.path.exists(COOKIES_FILE):
