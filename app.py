@@ -13,15 +13,15 @@ import re
 import json
 import urllib.parse
 import logging
+import traceback
 
-# Configure logging for better debugging
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Use Railway's writable /tmp
 DOWNLOAD_FOLDER = "/tmp/downloads"
 PROGRESS_DIR = "/tmp/progress"
 COOKIES_FILE = "/tmp/cookies.txt"
@@ -29,9 +29,7 @@ COOKIES_FILE = "/tmp/cookies.txt"
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROGRESS_DIR, exist_ok=True)
 
-# ------------------------ Progress Helpers ------------------------
 def save_progress(file_id, data):
-    """Save download progress to a JSON file."""
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
         with open(filepath, 'w') as f:
@@ -40,7 +38,6 @@ def save_progress(file_id, data):
         logger.error(f"save_progress error: {e}")
 
 def load_progress(file_id):
-    """Load progress from JSON file (shared across workers)."""
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
         if os.path.exists(filepath):
@@ -56,7 +53,6 @@ def load_progress(file_id):
     }
 
 def delete_progress(file_id):
-    """Remove progress file after download finishes or fails."""
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
         if os.path.exists(filepath):
@@ -65,14 +61,12 @@ def delete_progress(file_id):
         logger.error(f"delete_progress error: {e}")
 
 def clean_ansi(text):
-    """Strip ANSI escape codes from yt‑dlp output."""
     if not text:
         return "0%"
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return ansi_escape.sub('', str(text))
 
 def progress_hook(d, file_id):
-    """yt‑dlp progress callback – saves progress to file."""
     try:
         if d['status'] == 'downloading':
             percent = clean_ansi(d.get('_percent_str', '0%')).strip()
@@ -94,7 +88,6 @@ def progress_hook(d, file_id):
     except Exception as e:
         logger.error(f"progress_hook error: {e}")
 
-# ------------------------ FFmpeg Setup ------------------------
 def setup_ffmpeg():
     ffmpeg_dir = "/tmp/ffmpeg"
     ffmpeg_bin = os.path.join(ffmpeg_dir, "ffmpeg")
@@ -134,15 +127,13 @@ def setup_ffmpeg():
 
 FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
-# ------------------------ Cookies Setup ------------------------
 def setup_cookies():
-    """Load cookies from environment variable or local file."""
     yt_cookies = os.environ.get('YT_COOKIES', '')
     if yt_cookies and len(yt_cookies) > 10:
         try:
             with open(COOKIES_FILE, 'w') as f:
                 f.write(yt_cookies)
-            logger.info("Cookies loaded from environment variable")
+            logger.info("Cookies loaded from environment")
             return
         except Exception as e:
             logger.error(f"Failed to write cookies from env: {e}")
@@ -155,19 +146,16 @@ def setup_cookies():
         except Exception as e:
             logger.error(f"Failed to copy cookies: {e}")
 
-    logger.warning("No cookies found. Some videos may require login.")
+    logger.warning("No cookies found")
 
 setup_cookies()
 
-# ------------------------ Constants ------------------------
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
-# ------------------------ Helper Functions ------------------------
 def cleanup_file(filepath, file_id=None, delay=120):
-    """Delete file after delay and clean up progress."""
     def delete():
         time.sleep(delay)
         try:
@@ -187,19 +175,15 @@ def add_cors(response):
     return response
 
 def get_base_opts(referer_url=None, force_generic=False):
-    """Universal extractor options – works for any yt‑dlp supported site."""
+    """Universal extractor options – works for ALL yt-dlp supported sites"""
     headers = {
         'User-Agent': random.choice(USER_AGENTS),
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip, deflate, br',
         'DNT': '1',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'cross-site',
-        'Cache-Control': 'no-cache',
     }
 
     if referer_url:
@@ -219,17 +203,21 @@ def get_base_opts(referer_url=None, force_generic=False):
         'skip_unavailable_fragments': True,
         'http_headers': headers,
         'geo_bypass': True,
-        'geo_bypass_country': 'US',
+        'nocheckcertificate': True,  # Ignore SSL errors
+        'cookiesfrombrowser': None,  # Don't try to use browser cookies (Railway fix)
     }
 
     if os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
 
-    # Configure extractor arguments
+    # If force_generic, disable specific extractors and use only generic
+    # This fixes Facebook, Dailymotion, and any broken extractors
     if force_generic:
         opts['extractor_args'] = {
             'generic': {'hls': True, 'dash': True, 'pcm': True}
         }
+        # Also use extractor_lists to force generic only
+        opts['allowed_extractors'] = ['generic']
     else:
         opts['extractor_args'] = {
             'generic': {'hls': True, 'dash': True, 'pcm': True},
@@ -245,7 +233,6 @@ def get_base_opts(referer_url=None, force_generic=False):
 
 def get_ydl_opts(output_path=None, quality='720p', format_type='video',
                  file_id=None, referer_url=None, force_generic=False):
-    """Return yt‑dlp options for the requested format/quality."""
     opts = get_base_opts(referer_url, force_generic)
 
     if file_id:
@@ -265,11 +252,9 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video',
             }],
         })
         if output_path:
-            # Ensure no double dot when the extension is added later
             opts['outtmpl'] = output_path + '.%(ext)s'
         return opts
 
-    # Video quality mapping (including 1440p)
     quality_map = {
         '4k':    'bestvideo[height<=2160]+bestaudio/best',
         '1440p': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
@@ -289,25 +274,14 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video',
 
     return opts
 
-def should_retry_with_generic(error_msg):
-    """Decide whether to fall back to generic extractor."""
-    error_lower = str(error_msg).lower()
-    patterns = [
-        'cannot parse', 'no video formats found', 'unable to extract',
-        'formats not found', 'unsupported url', 'this video is unavailable',
-        'content too short', 'http error 403', 'http error 404',
-        'not available', 'geo restricted', 'sign in',
-    ]
-    return any(p in error_lower for p in patterns)
-
 # ------------------------ Routes ------------------------
 @app.route('/')
 def home():
     return jsonify({
         "status": "Universal Downloader Active",
-        "version": "6.1.0",
-        "capabilities": "All yt-dlp supported platforms",
-        "modes": "Platform-specific + Generic fallback"
+        "version": "6.2.0",
+        "capabilities": "All yt-dlp supported platforms (1000+ sites)",
+        "features": "Auto-fallback to generic extractor for broken sites"
     })
 
 @app.route('/health')
@@ -316,7 +290,6 @@ def health():
 
 @app.route('/progress/<file_id>', methods=['GET'])
 def get_progress(file_id):
-    """Return current download progress."""
     return jsonify(load_progress(file_id))
 
 @app.route('/info', methods=['POST', 'OPTIONS'])
@@ -329,7 +302,6 @@ def get_info():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    # Friendly platform name
     platform_name = "Universal"
     if 'youtube.com' in url or 'youtu.be' in url:
         platform_name = "YouTube"
@@ -346,27 +318,34 @@ def get_info():
     elif 'tiktok.com' in url:
         platform_name = "TikTok"
 
+    info = None
+    last_error = None
+
+    # Try 1: Platform-specific extractor
     try:
-        # Try with platform‑specific extractor first
         opts = get_base_opts(referer_url=url, force_generic=False)
         opts['skip_download'] = True
-
         with yt_dlp.YoutubeDL(opts) as ydl:
-            try:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        last_error = str(e)
+        logger.info(f"Platform extractor failed: {e}")
+
+    # Try 2: Generic extractor (fallback for ALL broken sites)
+    if not info:
+        try:
+            logger.info("Retrying with generic extractor...")
+            opts = get_base_opts(referer_url=url, force_generic=True)
+            opts['skip_download'] = True
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-            except Exception as e:
-                if should_retry_with_generic(str(e)):
-                    logger.info(f"Platform extractor failed, trying generic: {e}")
-                    opts = get_base_opts(referer_url=url, force_generic=True)
-                    opts['skip_download'] = True
-                    with yt_dlp.YoutubeDL(opts) as ydl2:
-                        info = ydl2.extract_info(url, download=False)
-                else:
-                    raise e
+        except Exception as e:
+            last_error = str(e)
+            logger.info(f"Generic extractor also failed: {e}")
 
-            if not info:
-                raise Exception("No video found")
-
+    # Process results
+    if info:
+        try:
             formats = info.get('formats', [])
             qualities_set = set()
             for f in formats:
@@ -379,11 +358,9 @@ def get_info():
                     elif h >= 480: qualities_set.add('480p')
                     elif h >= 360: qualities_set.add('360p')
 
-            # If no heights found, assume standard qualities (generic extractor)
             if not qualities_set:
                 qualities_set = {'720p', '480p', '360p'}
 
-            # Keep the order logical
             order = ['4k', '1440p', '1080p', '720p', '480p', '360p']
             sorted_qualities = [q for q in order if q in qualities_set]
 
@@ -396,20 +373,28 @@ def get_info():
                 "qualities": sorted_qualities,
                 "has_audio": True
             })
+        except Exception as e:
+            logger.error(f"Error processing info: {e}")
+            return jsonify({"error": "Failed to process video info"}), 400
 
-    except Exception as e:
-        err = str(e)
-        if 'drm' in err.lower():
+    # Both failed
+    if last_error:
+        if 'drm' in last_error.lower():
             return jsonify({
                 "error": "❌ DRM Protected",
-                "details": "Netflix, Prime Video, Disney+ etc. cannot be downloaded due to encryption."
+                "details": "This content uses encryption (Netflix, Prime, Disney+) and cannot be downloaded."
             }), 400
-        elif 'unsupported url' in err.lower():
+        elif 'unsupported url' in last_error.lower():
             return jsonify({
                 "error": "❌ Unsupported URL",
-                "details": "This site is not supported. Try YouTube, Vimeo, Dailymotion, Twitter, Instagram, TikTok, or direct video links."
+                "details": "This site is not supported. Try YouTube, Vimeo, Dailymotion, Twitter, Instagram, TikTok, or direct MP4 links."
             }), 400
-        return jsonify({"error": err}), 400
+        else:
+            return jsonify({
+                "error": f"❌ Cannot extract video: {last_error[:150]}"
+            }), 400
+    
+    return jsonify({"error": "Unknown error"}), 400
 
 @app.route('/download', methods=['POST', 'OPTIONS'])
 def download_video():
@@ -426,7 +411,6 @@ def download_video():
         return jsonify({"error": "No URL provided"}), 400
 
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
-
     save_progress(file_id, {
         "status": "Starting...",
         "percent": "0%",
@@ -434,45 +418,70 @@ def download_video():
         "eta": "Unknown"
     })
 
+    info = None
+    last_error = None
+
+    # Try 1: Platform-specific
     try:
-        # First attempt with platform‑specific extractor
+        opts = get_ydl_opts(output_path, quality, format_type, file_id,
+                            referer_url=url, force_generic=False)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except Exception as e:
+        last_error = str(e)
+        logger.info(f"Platform download failed: {e}")
+
+    # Try 2: Generic fallback (works for any site with embedded video)
+    if not info:
         try:
+            logger.info("Retrying download with generic extractor...")
+            save_progress(file_id, {
+                "status": "Retrying with universal method...",
+                "percent": "5%",
+                "speed": "0 B/s",
+                "eta": "Unknown"
+            })
             opts = get_ydl_opts(output_path, quality, format_type, file_id,
-                                referer_url=url, force_generic=False)
+                                referer_url=url, force_generic=True)
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
         except Exception as e:
-            # Retry with generic extractor if appropriate
-            if should_retry_with_generic(str(e)):
-                logger.info(f"Download retry with generic: {e}")
-                save_progress(file_id, {
-                    "status": "Retrying with universal method...",
-                    "percent": "5%",
-                    "speed": "0 B/s",
-                    "eta": "Unknown"
-                })
-                opts = get_ydl_opts(output_path, quality, format_type, file_id,
-                                    referer_url=url, force_generic=True)
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
+            last_error = str(e)
+            logger.info(f"Generic download also failed: {e}")
+
+    if not info:
+        delete_progress(file_id)
+        if last_error:
+            if 'drm' in last_error.lower():
+                msg = "❌ DRM Protected: This content is encrypted and cannot be downloaded."
+            elif 'no video formats found' in last_error.lower():
+                msg = "❌ No video formats found. The video may be geo-blocked, private, or requires login."
+            elif 'cannot parse' in last_error.lower():
+                msg = "❌ Cannot parse video. The site may have changed their layout or the video is private."
+            elif 'unsupported url' in last_error.lower():
+                msg = "❌ Unsupported URL. Try: YouTube, Vimeo, Dailymotion, Twitter, Instagram, TikTok."
+            elif '403' in last_error:
+                msg = "❌ Access denied (403). The site is blocking downloads."
+            elif '404' in last_error:
+                msg = "❌ Video not found (404). Check if the URL is correct."
+            elif 'sign in' in last_error.lower():
+                msg = "❌ Login required. This video requires authentication."
             else:
-                raise e
+                msg = f"❌ Download failed: {last_error[:200]}"
+            return jsonify({"error": msg}), 400
+        return jsonify({"error": "❌ Download failed for unknown reason"}), 400
 
-        if not info:
-            raise Exception("Download failed")
-
+    try:
         title = info.get('title', 'video')
-
-        # Locate the downloaded file
+        
+        # Find downloaded file
         downloaded_file = None
-        # First check expected extensions
         for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3', 'mov']:
             candidate = f"{output_path}.{ext}"
             if os.path.exists(candidate):
                 downloaded_file = candidate
                 break
 
-        # Fallback: scan download folder for files starting with file_id
         if not downloaded_file:
             for f in os.listdir(DOWNLOAD_FOLDER):
                 if f.startswith(file_id):
@@ -506,7 +515,7 @@ def download_video():
         def generate():
             with open(downloaded_file, 'rb') as f:
                 while True:
-                    chunk = f.read(1024 * 1024)  # 1 MB chunks
+                    chunk = f.read(1024 * 1024)
                     if not chunk:
                         break
                     yield chunk
@@ -522,33 +531,10 @@ def download_video():
             }
         )
 
-    except yt_dlp.utils.DownloadError as e:
-        err = str(e)
-        # Provide user‑friendly messages
-        if 'drm' in err.lower():
-            msg = "❌ DRM Protected: This content is encrypted and cannot be downloaded."
-        elif 'no video formats found' in err.lower():
-            msg = "❌ No video formats found. The video may be geo-blocked, private, or requires login."
-        elif 'cannot parse' in err.lower():
-            msg = "❌ Cannot parse video data. The site may have changed their layout."
-        elif 'unsupported url' in err.lower():
-            msg = "❌ Unsupported URL. Try: YouTube, Vimeo, Dailymotion, Twitter, Instagram, TikTok."
-        elif '403' in err:
-            msg = "❌ Access denied (403). The site is blocking downloads."
-        elif '404' in err:
-            msg = "❌ Video not found (404). The URL may be invalid or expired."
-        elif 'sign in' in err.lower() or 'login' in err.lower():
-            msg = "❌ Login required. Add cookies in Railway dashboard for private videos."
-        else:
-            msg = f"❌ {err[:200]}"
-
-        delete_progress(file_id)
-        return jsonify({"error": msg}), 400
-
     except Exception as e:
+        logger.exception("Error serving file")
         delete_progress(file_id)
-        logger.exception("Unexpected download error")
-        return jsonify({"error": f"Server error: {str(e)}"}), 500
+        return jsonify({"error": f"❌ Server error: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
