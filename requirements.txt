@@ -1,4 +1,6 @@
 flask==3.0.0
 flask-cors==4.0.0
-yt-dlp==2024.11.18
+yt-dlp>=2025.3.27
 gunicorn==21.2.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
