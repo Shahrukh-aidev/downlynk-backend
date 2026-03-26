@@ -13,7 +13,8 @@ import re
 import json
 import urllib.parse
 import logging
-import traceback
+import requests
+from bs4 import BeautifulSoup
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +30,7 @@ COOKIES_FILE = "/tmp/cookies.txt"
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROGRESS_DIR, exist_ok=True)
 
+# ------------------------ Progress Helpers ------------------------
 def save_progress(file_id, data):
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
@@ -88,6 +90,7 @@ def progress_hook(d, file_id):
     except Exception as e:
         logger.error(f"progress_hook error: {e}")
 
+# ------------------------ FFmpeg Setup ------------------------
 def setup_ffmpeg():
     ffmpeg_dir = "/tmp/ffmpeg"
     ffmpeg_bin = os.path.join(ffmpeg_dir, "ffmpeg")
@@ -127,6 +130,7 @@ def setup_ffmpeg():
 
 FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
+# ------------------------ Cookies Setup ------------------------
 def setup_cookies():
     yt_cookies = os.environ.get('YT_COOKIES', '')
     if yt_cookies and len(yt_cookies) > 10:
@@ -150,11 +154,59 @@ def setup_cookies():
 
 setup_cookies()
 
+# ------------------------ User Agents ------------------------
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
+# ------------------------ Facebook Manual Extraction ------------------------
+def extract_facebook_video_url(reel_url):
+    """
+    Attempt to extract the direct video URL from a Facebook Reel/Video page.
+    Returns a direct video URL or None.
+    """
+    try:
+        headers = {
+            'User-Agent': random.choice(USER_AGENTS),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+        resp = requests.get(reel_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            logger.info(f"Facebook page fetch failed: {resp.status_code}")
+            return None
+
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        # 1. Look for og:video meta tag
+        meta = soup.find('meta', property='og:video')
+        if meta and meta.get('content'):
+            return meta['content']
+
+        # 2. Look for video tag with src
+        video_tag = soup.find('video')
+        if video_tag and video_tag.get('src'):
+            return video_tag['src']
+
+        # 3. Look for script containing "video_url" (common in Facebook)
+        scripts = soup.find_all('script')
+        for script in scripts:
+            if script.string and 'video_url' in script.string:
+                # Try to extract URL using regex
+                match = re.search(r'"video_url":"([^"]+)"', script.string)
+                if match:
+                    url = match.group(1).replace('\\/', '/')
+                    return url
+
+        logger.info("No direct video URL found in page")
+        return None
+
+    except Exception as e:
+        logger.error(f"Facebook extraction error: {e}")
+        return None
+
+# ------------------------ Helper Functions ------------------------
 def cleanup_file(filepath, file_id=None, delay=120):
     def delete():
         time.sleep(delay)
@@ -203,21 +255,17 @@ def get_base_opts(referer_url=None, force_generic=False):
         'skip_unavailable_fragments': True,
         'http_headers': headers,
         'geo_bypass': True,
-        'nocheckcertificate': True,  # Ignore SSL errors
-        'cookiesfrombrowser': None,  # Don't try to use browser cookies (Railway fix)
+        'nocheckcertificate': True,
+        'cookiesfrombrowser': None,  # Don't try to use browser cookies
     }
 
     if os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
 
-    # If force_generic, disable specific extractors and use only generic
-    # This fixes Facebook, Dailymotion, and any broken extractors
     if force_generic:
         opts['extractor_args'] = {
             'generic': {'hls': True, 'dash': True, 'pcm': True}
         }
-        # Also use extractor_lists to force generic only
-        opts['allowed_extractors'] = ['generic']
     else:
         opts['extractor_args'] = {
             'generic': {'hls': True, 'dash': True, 'pcm': True},
@@ -279,9 +327,9 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video',
 def home():
     return jsonify({
         "status": "Universal Downloader Active",
-        "version": "6.2.0",
-        "capabilities": "All yt-dlp supported platforms (1000+ sites)",
-        "features": "Auto-fallback to generic extractor for broken sites"
+        "version": "6.3.0",
+        "capabilities": "All yt-dlp supported platforms + Facebook fallback",
+        "features": "Auto-fallback to generic extractor and manual extraction for Facebook"
     })
 
 @app.route('/health')
@@ -303,10 +351,12 @@ def get_info():
         return jsonify({"error": "No URL provided"}), 400
 
     platform_name = "Universal"
+    is_facebook = False
     if 'youtube.com' in url or 'youtu.be' in url:
         platform_name = "YouTube"
     elif 'facebook.com' in url or 'fb.watch' in url:
         platform_name = "Facebook"
+        is_facebook = True
     elif 'dailymotion.com' in url:
         platform_name = "Dailymotion"
     elif 'vimeo.com' in url:
@@ -331,7 +381,7 @@ def get_info():
         last_error = str(e)
         logger.info(f"Platform extractor failed: {e}")
 
-    # Try 2: Generic extractor (fallback for ALL broken sites)
+    # Try 2: Generic extractor (fallback for all broken sites)
     if not info:
         try:
             logger.info("Retrying with generic extractor...")
@@ -342,6 +392,21 @@ def get_info():
         except Exception as e:
             last_error = str(e)
             logger.info(f"Generic extractor also failed: {e}")
+
+    # Try 3: Manual Facebook extraction (if Facebook and still no info)
+    if not info and is_facebook:
+        logger.info("Attempting manual Facebook video extraction...")
+        direct_url = extract_facebook_video_url(url)
+        if direct_url:
+            logger.info(f"Manual extraction found direct URL: {direct_url}")
+            try:
+                opts = get_base_opts(referer_url=direct_url, force_generic=True)
+                opts['skip_download'] = True
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(direct_url, download=False)
+            except Exception as e:
+                last_error = str(e)
+                logger.info(f"Manual extraction fallback failed: {e}")
 
     # Process results
     if info:
@@ -377,7 +442,7 @@ def get_info():
             logger.error(f"Error processing info: {e}")
             return jsonify({"error": "Failed to process video info"}), 400
 
-    # Both failed
+    # All attempts failed
     if last_error:
         if 'drm' in last_error.lower():
             return jsonify({
@@ -393,7 +458,7 @@ def get_info():
             return jsonify({
                 "error": f"❌ Cannot extract video: {last_error[:150]}"
             }), 400
-    
+
     return jsonify({"error": "Unknown error"}), 400
 
 @app.route('/download', methods=['POST', 'OPTIONS'])
@@ -410,6 +475,7 @@ def download_video():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
+    is_facebook = 'facebook.com' in url or 'fb.watch' in url
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
     save_progress(file_id, {
         "status": "Starting...",
@@ -431,7 +497,7 @@ def download_video():
         last_error = str(e)
         logger.info(f"Platform download failed: {e}")
 
-    # Try 2: Generic fallback (works for any site with embedded video)
+    # Try 2: Generic fallback
     if not info:
         try:
             logger.info("Retrying download with generic extractor...")
@@ -448,6 +514,27 @@ def download_video():
         except Exception as e:
             last_error = str(e)
             logger.info(f"Generic download also failed: {e}")
+
+    # Try 3: Manual Facebook extraction (if Facebook and still no info)
+    if not info and is_facebook:
+        logger.info("Attempting manual Facebook video extraction for download...")
+        direct_url = extract_facebook_video_url(url)
+        if direct_url:
+            logger.info(f"Manual extraction found direct URL: {direct_url}")
+            try:
+                save_progress(file_id, {
+                    "status": "Using extracted direct video URL...",
+                    "percent": "5%",
+                    "speed": "0 B/s",
+                    "eta": "Unknown"
+                })
+                opts = get_ydl_opts(output_path, quality, format_type, file_id,
+                                    referer_url=direct_url, force_generic=True)
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(direct_url, download=True)
+            except Exception as e:
+                last_error = str(e)
+                logger.info(f"Manual extraction download failed: {e}")
 
     if not info:
         delete_progress(file_id)
