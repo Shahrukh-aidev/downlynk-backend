@@ -16,14 +16,48 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# ✅ CRITICAL: Use /tmp for Railway's ephemeral storage
+# ✅ RAILWAY FIX: Use /tmp for all storage (ephemeral filesystem)
 DOWNLOAD_FOLDER = "/tmp/downloads"
-COOKIES_FILE = "/tmp/cookies.txt"  # Also put cookies in /tmp
-os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+PROGRESS_DIR = "/tmp/progress"  # File-based progress for multi-worker support
+COOKIES_FILE = "/tmp/cookies.txt"
 
-# Thread-safe progress storage
-download_progress = {}
-progress_lock = threading.Lock()
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+os.makedirs(PROGRESS_DIR, exist_ok=True)
+
+# ========== FILE-BASED PROGRESS (Works with multiple Gunicorn workers) ==========
+def save_progress(file_id, data):
+    """Save progress to temp file (shared across all workers)"""
+    try:
+        filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
+        with open(filepath, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Save progress error: {e}")
+
+def load_progress(file_id):
+    """Load progress from temp file"""
+    try:
+        filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Load progress error: {e}")
+    return {
+        "status": "Initializing...",
+        "percent": "0%",
+        "speed": "0 B/s",
+        "eta": "Unknown"
+    }
+
+def delete_progress(file_id):
+    """Clean up progress file"""
+    try:
+        filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
+        if os.path.exists(filepath):
+            os.remove(filepath)
+    except:
+        pass
 
 def clean_ansi(text):
     """Remove terminal color codes from yt-dlp output"""
@@ -35,27 +69,24 @@ def clean_ansi(text):
 def progress_hook(d, file_id):
     """Capture yt-dlp progress updates"""
     try:
-        with progress_lock:
-            if d['status'] == 'downloading':
-                percent = clean_ansi(d.get('_percent_str', '0%')).strip()
-                speed = clean_ansi(d.get('_speed_str', 'Unknown')).strip()
-                eta = clean_ansi(d.get('_eta_str', 'Unknown')).strip()
-                
-                download_progress[file_id] = {
-                    "status": "Downloading...",
-                    "percent": percent,
-                    "speed": speed,
-                    "eta": eta,
-                    "timestamp": time.time()
-                }
-            elif d['status'] == 'finished':
-                download_progress[file_id] = {
-                    "status": "Processing file (merging audio/video)...",
-                    "percent": "100%",
-                    "speed": "0 B/s",
-                    "eta": "00:00",
-                    "timestamp": time.time()
-                }
+        if d['status'] == 'downloading':
+            percent = clean_ansi(d.get('_percent_str', '0%')).strip()
+            speed = clean_ansi(d.get('_speed_str', 'Unknown')).strip()
+            eta = clean_ansi(d.get('_eta_str', 'Unknown')).strip()
+            
+            save_progress(file_id, {
+                "status": "Downloading...",
+                "percent": percent,
+                "speed": speed,
+                "eta": eta
+            })
+        elif d['status'] == 'finished':
+            save_progress(file_id, {
+                "status": "Processing file...",
+                "percent": "100%",
+                "speed": "0 B/s",
+                "eta": "00:00"
+            })
     except Exception as e:
         print(f"Progress hook error: {e}")
 
@@ -94,68 +125,62 @@ def setup_ffmpeg():
         return ffmpeg_bin, ffprobe_bin
         
     except Exception as e:
-        print(f"⚠️ FFmpeg download failed: {e}")
+        print(f"⚠️ FFmpeg failed: {e}")
         return None, None
 
 FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
 # ========== COOKIES SETUP ==========
 def setup_cookies():
-    # Method 1: From Environment Variable (Railway Secret)
+    # Method 1: Environment Variable (recommended for Railway Secrets)
     yt_cookies = os.environ.get('YT_COOKIES', '')
-    if yt_cookies and len(yt_cookies) > 10:
+    if yt_cookies and len(yt_cookies) > 50:
         try:
             with open(COOKIES_FILE, 'w') as f:
                 f.write(yt_cookies)
-            print("✅ Cookies loaded from env var")
+            print("✅ Cookies loaded from env")
             return
         except Exception as e:
-            print(f"⚠️ Failed to write cookies from env: {e}")
+            print(f"⚠️ Env cookies failed: {e}")
     
-    # Method 2: From URL (GitHub Gist, etc.)
+    # Method 2: URL (GitHub Gist, etc.)
     cookies_url = os.environ.get('COOKIES_URL', '')
     if cookies_url:
         try:
             urllib.request.urlretrieve(cookies_url, COOKIES_FILE)
-            print("✅ Cookies downloaded from URL")
+            print("✅ Cookies loaded from URL")
             return
         except Exception as e:
-            print(f"⚠️ Failed to download cookies: {e}")
+            print(f"⚠️ URL cookies failed: {e}")
     
-    # Method 3: Check if cookies.txt exists in repo (committed file)
+    # Method 3: Local file (if committed to repo)
     if os.path.exists("cookies.txt"):
         try:
             shutil.copy("cookies.txt", COOKIES_FILE)
-            print("✅ Cookies copied from repo")
+            print("✅ Cookies loaded from repo")
             return
-        except Exception as e:
-            print(f"⚠️ Failed to copy cookies: {e}")
+        except:
+            pass
     
     print("⚠️ No cookies configured")
 
 setup_cookies()
 
-# ========== USER AGENTS ==========
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
 def cleanup_file(filepath, file_id=None, delay=120):
-    """Delete file after delay and clean up progress"""
     def delete():
         time.sleep(delay)
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
-                print(f"🗑️ Cleaned up: {filepath}")
-        except Exception as e:
-            print(f"Cleanup error: {e}")
-        finally:
             if file_id:
-                with progress_lock:
-                    if file_id in download_progress:
-                        del download_progress[file_id]
+                delete_progress(file_id)
+        except: 
+            pass
     threading.Thread(target=delete, daemon=True).start()
 
 @app.after_request
@@ -167,7 +192,7 @@ def add_cors(response):
 
 def get_base_opts():
     opts = {
-        'quiet': True,  # Keep True, hooks work independently
+        'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'socket_timeout': 60,
@@ -185,24 +210,16 @@ def get_base_opts():
         },
     }
     
-    # Check multiple cookie locations
     if os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
-    elif os.path.exists('/tmp/cookies.txt'):
-        opts['cookiefile'] = '/tmp/cookies.txt'
-    elif os.path.exists('cookies.txt'):
-        opts['cookiefile'] = 'cookies.txt'
-        
     return opts
 
 def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=None):
     opts = get_base_opts()
     
-    # ✅ CRITICAL: Attach progress hook
+    # ✅ Attach progress hook
     if file_id:
         opts['progress_hooks'] = [lambda d: progress_hook(d, file_id)]
-        # Enable verbose to ensure hooks fire (only for debugging if needed)
-        # opts['verbose'] = True
     
     if FFMPEG_PATH and FFPROBE_PATH:
         opts['ffmpeg_location'] = FFMPEG_PATH
@@ -222,19 +239,18 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=
         return opts
 
     quality_map = {
-    '4k':    'bestvideo[height<=2160]+bestaudio/best',
-    '1440p': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
-    '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
-    '720p':  'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-    '480p':  'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
-    '360p':  'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
-    '240p':  'bestvideo[height<=240]+bestaudio/best[height<=240]/best',
-}
+        '4k':    'bestvideo[height<=2160]+bestaudio/best',
+        '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+        '720p':  'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+        '480p':  'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+        '360p':  'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
+        '240p':  'bestvideo[height<=240]+bestaudio/best[height<=240]/best',
+    }
 
     opts.update({
         'format': quality_map.get(quality, quality_map['720p']),
         'merge_output_format': 'mp4',
-        'concurrent_fragment_downloads': 2,  # Reduced for stability
+        'concurrent_fragment_downloads': 2,
     })
 
     if output_path:
@@ -242,17 +258,15 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=
 
     return opts
 
-# ========== ROUTES ==========
 @app.route('/')
 def home():
     cookies_status = "loaded" if os.path.exists(COOKIES_FILE) else "missing"
     ffmpeg_status = "available" if FFMPEG_PATH else "missing"
     return jsonify({
-        "status": "Downlynk backend is running!",
-        "version": "3.1.0",
+        "status": "Downlynk backend running",
+        "version": "3.2.0",
         "cookies": cookies_status,
         "ffmpeg": ffmpeg_status,
-        "time": datetime.now().isoformat()
     })
 
 @app.route('/health')
@@ -262,14 +276,7 @@ def health():
 @app.route('/progress/<file_id>', methods=['GET'])
 def get_progress(file_id):
     """Return current progress for a download"""
-    with progress_lock:
-        data = download_progress.get(file_id, {
-            "status": "Initializing...",
-            "percent": "0%",
-            "speed": "0 B/s",
-            "eta": "Unknown"
-        })
-    return jsonify(data)
+    return jsonify(load_progress(file_id))
 
 @app.route('/info', methods=['POST', 'OPTIONS'])
 def get_info():
@@ -332,14 +339,12 @@ def download_video():
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
     
     # Initialize progress
-    with progress_lock:
-        download_progress[file_id] = {
-            "status": "Starting download...",
-            "percent": "0%",
-            "speed": "0 B/s",
-            "eta": "Unknown",
-            "timestamp": time.time()
-        }
+    save_progress(file_id, {
+        "status": "Starting download...",
+        "percent": "0%",
+        "speed": "0 B/s",
+        "eta": "Unknown"
+    })
 
     try:
         opts = get_ydl_opts(output_path, quality, format_type, file_id)
@@ -348,23 +353,20 @@ def download_video():
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'video')
 
-        # Find the downloaded file
+        # Find downloaded file
         downloaded_file = None
         expected_ext = 'mp3' if format_type == 'audio' else 'mp4'
-        
-        # Check primary expected file
         primary_file = f"{output_path}.{expected_ext}"
+        
         if os.path.exists(primary_file):
             downloaded_file = primary_file
         else:
-            # Check all possible extensions
             for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3']:
                 candidate = f"{output_path}.{ext}"
                 if os.path.exists(candidate):
                     downloaded_file = candidate
                     break
         
-        # Fallback: search directory
         if not downloaded_file:
             for f in os.listdir(DOWNLOAD_FOLDER):
                 if f.startswith(file_id):
@@ -378,15 +380,13 @@ def download_video():
         ext = downloaded_file.split('.')[-1]
         file_size = os.path.getsize(downloaded_file)
         
-        # Update progress to complete
-        with progress_lock:
-            download_progress[file_id] = {
-                "status": "Complete",
-                "percent": "100%",
-                "speed": "0 B/s",
-                "eta": "00:00",
-                "timestamp": time.time()
-            }
+        # Mark complete
+        save_progress(file_id, {
+            "status": "Complete",
+            "percent": "100%",
+            "speed": "0 B/s",
+            "eta": "00:00"
+        })
 
         mime_map = {
             'mp4': 'video/mp4', 'webm': 'video/webm',
@@ -402,7 +402,6 @@ def download_video():
                     if not chunk:
                         break
                     yield chunk
-            # Cleanup after streaming
             cleanup_file(downloaded_file, file_id=file_id, delay=60)
 
         return Response(
@@ -411,32 +410,28 @@ def download_video():
             headers={
                 'Content-Disposition': f'attachment; filename="{dl_name}"',
                 'Content-Length': str(file_size),
-                'X-Accel-Buffering': 'no',  # Disable nginx buffering for streaming
+                'X-Accel-Buffering': 'no',
             }
         )
 
     except yt_dlp.utils.DownloadError as e:
         err = str(e)
         if '403' in err or 'blocked' in err.lower():
-            msg = "YouTube blocked this request. Check cookies."
+            msg = "YouTube blocked request. Check cookies."
         elif 'age' in err.lower() or 'sign in' in err.lower():
-            msg = "Age verification required. Update YouTube cookies."
+            msg = "Age verification required."
         elif 'private' in err.lower():
-            msg = "This video is private."
+            msg = "Video is private."
         elif 'copyright' in err.lower():
             msg = "Copyright blocked."
         else:
             msg = f"Download failed: {err[:200]}"
         
-        with progress_lock:
-            if file_id in download_progress:
-                del download_progress[file_id]
+        delete_progress(file_id)
         return jsonify({"error": msg}), 400
         
     except Exception as e:
-        with progress_lock:
-            if file_id in download_progress:
-                del download_progress[file_id]
+        delete_progress(file_id)
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 if __name__ == '__main__':
