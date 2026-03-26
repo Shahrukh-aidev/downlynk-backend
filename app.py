@@ -11,38 +11,39 @@ import tarfile
 import shutil
 import re
 import json
+import urllib.parse
 from datetime import datetime
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# ✅ RAILWAY FIX: Use /tmp for all storage (ephemeral filesystem)
+# Railway requires /tmp for write access
 DOWNLOAD_FOLDER = "/tmp/downloads"
-PROGRESS_DIR = "/tmp/progress"  # File-based progress for multi-worker support
+PROGRESS_DIR = "/tmp/progress" 
 COOKIES_FILE = "/tmp/cookies.txt"
 
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROGRESS_DIR, exist_ok=True)
 
-# ========== FILE-BASED PROGRESS (Works with multiple Gunicorn workers) ==========
+# ========== FILE-BASED PROGRESS (Required for Railway multi-worker) ==========
 def save_progress(file_id, data):
-    """Save progress to temp file (shared across all workers)"""
+    """Save progress to shared file system"""
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
         with open(filepath, 'w') as f:
-            json.dump(data, f)
+            json.dump({**data, "timestamp": time.time()}, f)
     except Exception as e:
-        print(f"Save progress error: {e}")
+        print(f"Progress save error: {e}")
 
 def load_progress(file_id):
-    """Load progress from temp file"""
+    """Load progress from file (works across all workers)"""
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
         if os.path.exists(filepath):
             with open(filepath, 'r') as f:
                 return json.load(f)
-    except Exception as e:
-        print(f"Load progress error: {e}")
+    except:
+        pass
     return {
         "status": "Initializing...",
         "percent": "0%",
@@ -51,7 +52,6 @@ def load_progress(file_id):
     }
 
 def delete_progress(file_id):
-    """Clean up progress file"""
     try:
         filepath = os.path.join(PROGRESS_DIR, f"{file_id}.json")
         if os.path.exists(filepath):
@@ -60,14 +60,14 @@ def delete_progress(file_id):
         pass
 
 def clean_ansi(text):
-    """Remove terminal color codes from yt-dlp output"""
+    """Remove color codes from yt-dlp output"""
     if not text:
         return "0%"
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return ansi_escape.sub('', str(text))
 
 def progress_hook(d, file_id):
-    """Capture yt-dlp progress updates"""
+    """Real-time progress capture"""
     try:
         if d['status'] == 'downloading':
             percent = clean_ansi(d.get('_percent_str', '0%')).strip()
@@ -82,13 +82,13 @@ def progress_hook(d, file_id):
             })
         elif d['status'] == 'finished':
             save_progress(file_id, {
-                "status": "Processing file...",
+                "status": "Processing video...",
                 "percent": "100%",
                 "speed": "0 B/s",
                 "eta": "00:00"
             })
     except Exception as e:
-        print(f"Progress hook error: {e}")
+        print(f"Hook error: {e}")
 
 # ========== FFMPEG SETUP ==========
 def setup_ffmpeg():
@@ -121,48 +121,48 @@ def setup_ffmpeg():
         os.chmod(ffmpeg_bin, 0o755)
         os.chmod(ffprobe_bin, 0o755)
         os.remove(tar_path)
-        print(f"✅ FFmpeg ready")
+        print("✅ FFmpeg ready")
         return ffmpeg_bin, ffprobe_bin
         
     except Exception as e:
-        print(f"⚠️ FFmpeg failed: {e}")
+        print(f"⚠️ FFmpeg error: {e}")
         return None, None
 
 FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
 # ========== COOKIES SETUP ==========
 def setup_cookies():
-    # Method 1: Environment Variable (recommended for Railway Secrets)
+    # Try env var first (Railway Secret)
     yt_cookies = os.environ.get('YT_COOKIES', '')
     if yt_cookies and len(yt_cookies) > 50:
         try:
             with open(COOKIES_FILE, 'w') as f:
                 f.write(yt_cookies)
-            print("✅ Cookies loaded from env")
-            return
-        except Exception as e:
-            print(f"⚠️ Env cookies failed: {e}")
-    
-    # Method 2: URL (GitHub Gist, etc.)
-    cookies_url = os.environ.get('COOKIES_URL', '')
-    if cookies_url:
-        try:
-            urllib.request.urlretrieve(cookies_url, COOKIES_FILE)
-            print("✅ Cookies loaded from URL")
-            return
-        except Exception as e:
-            print(f"⚠️ URL cookies failed: {e}")
-    
-    # Method 3: Local file (if committed to repo)
-    if os.path.exists("cookies.txt"):
-        try:
-            shutil.copy("cookies.txt", COOKIES_FILE)
-            print("✅ Cookies loaded from repo")
+            print("✅ Cookies from env")
             return
         except:
             pass
     
-    print("⚠️ No cookies configured")
+    # Try URL
+    cookies_url = os.environ.get('COOKIES_URL', '')
+    if cookies_url:
+        try:
+            urllib.request.urlretrieve(cookies_url, COOKIES_FILE)
+            print("✅ Cookies from URL")
+            return
+        except:
+            pass
+    
+    # Fallback to local file
+    if os.path.exists("cookies.txt"):
+        try:
+            shutil.copy("cookies.txt", COOKIES_FILE)
+            print("✅ Cookies from file")
+            return
+        except:
+            pass
+    
+    print("⚠️ No cookies")
 
 setup_cookies()
 
@@ -190,19 +190,51 @@ def add_cors(response):
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
-def get_base_opts():
+def get_base_opts(referer_url=None):
+    """
+    Universal extractor options - supports YouTube, movies, any site
+    """
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'cross-site',
+        'Cache-Control': 'no-cache',
+    }
+    
+    # Set referer for movie sites (crucial for hindimovies.to, etc)
+    if referer_url:
+        try:
+            parsed = urllib.parse.urlparse(referer_url)
+            referer = f"{parsed.scheme}://{parsed.netloc}/"
+            headers['Referer'] = referer
+        except:
+            pass
+    
     opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'socket_timeout': 60,
-        'retries': 10,
-        'fragment_retries': 10,
-        'http_headers': {
-            'User-Agent': random.choice(USER_AGENTS),
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
+        'socket_timeout': 120,  # Longer for slow movie servers
+        'retries': 20,
+        'fragment_retries': 20,
+        'skip_unavailable_fragments': True,
+        'http_headers': headers,
+        'geo_bypass': True,
+        'geo_bypass_country': 'US',
+        # CRITICAL: Enable generic extractor for unknown sites
         'extractor_args': {
+            'generic': {
+                'hls': True,
+                'dash': True,
+                'pcm': True,
+            },
             'youtube': {
                 'player_client': ['android', 'ios', 'web'],
                 'player_skip': ['webpage', 'config'],
@@ -212,12 +244,12 @@ def get_base_opts():
     
     if os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
+        
     return opts
 
-def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=None):
-    opts = get_base_opts()
+def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=None, referer_url=None):
+    opts = get_base_opts(referer_url)
     
-    # ✅ Attach progress hook
     if file_id:
         opts['progress_hooks'] = [lambda d: progress_hook(d, file_id)]
     
@@ -238,6 +270,7 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=
             opts['outtmpl'] = output_path + '.%(ext)s'
         return opts
 
+    # Universal quality selection
     quality_map = {
         '4k':    'bestvideo[height<=2160]+bestaudio/best',
         '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
@@ -245,13 +278,12 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=
         '480p':  'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
         '360p':  'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
         '240p':  'bestvideo[height<=240]+bestaudio/best[height<=240]/best',
+        'best':  'bestvideo+bestaudio/best',
     }
 
-    opts.update({
-        'format': quality_map.get(quality, quality_map['720p']),
-        'merge_output_format': 'mp4',
-        'concurrent_fragment_downloads': 2,
-    })
+    opts['format'] = quality_map.get(quality, quality_map['720p'])
+    opts['merge_output_format'] = 'mp4'
+    opts['concurrent_fragment_downloads'] = 3
 
     if output_path:
         opts['outtmpl'] = output_path + '.%(ext)s'
@@ -260,13 +292,11 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=
 
 @app.route('/')
 def home():
-    cookies_status = "loaded" if os.path.exists(COOKIES_FILE) else "missing"
-    ffmpeg_status = "available" if FFMPEG_PATH else "missing"
     return jsonify({
-        "status": "Downlynk backend running",
-        "version": "3.2.0",
-        "cookies": cookies_status,
-        "ffmpeg": ffmpeg_status,
+        "status": "Universal Downloader Ready",
+        "version": "5.0.0",
+        "capabilities": "All Sites (YouTube, Movies, TV, Any URL)",
+        "ffmpeg": "available" if FFMPEG_PATH else "missing"
     })
 
 @app.route('/health')
@@ -275,7 +305,6 @@ def health():
 
 @app.route('/progress/<file_id>', methods=['GET'])
 def get_progress(file_id):
-    """Return current progress for a download"""
     return jsonify(load_progress(file_id))
 
 @app.route('/info', methods=['POST', 'OPTIONS'])
@@ -289,11 +318,15 @@ def get_info():
         return jsonify({"error": "No URL provided"}), 400
 
     try:
-        opts = get_base_opts()
+        opts = get_base_opts(referer_url=url)
         opts['skip_download'] = True
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            
+            if not info:
+                raise Exception("No video found")
+
             formats = info.get('formats', [])
             qualities_set = set()
             
@@ -307,20 +340,31 @@ def get_info():
                     elif h >= 360: qualities_set.add('360p')
                     elif h >= 240: qualities_set.add('240p')
 
+            # For generic sites with no format info, assume standard qualities
+            if not qualities_set:
+                qualities_set = {'720p', '480p', '360p'}
+
             order = ['4k', '1080p', '720p', '480p', '360p', '240p']
             sorted_qualities = [q for q in order if q in qualities_set]
 
             return jsonify({
-                "title": str(info.get('title', 'Unknown')),
+                "title": str(info.get('title', 'Video')),
                 "duration": info.get('duration') or 0,
-                "thumbnail": str(info.get('thumbnail', '') or ''),
+                "thumbnail": str(info.get('thumbnail', '')),
                 "uploader": str(info.get('uploader', 'Unknown')),
-                "platform": str(info.get('extractor_key', 'Unknown')),
+                "platform": str(info.get('extractor_key', 'Universal')),
                 "qualities": sorted_qualities,
-                "has_audio": True,
+                "has_audio": True
             })
+            
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        err = str(e)
+        if 'Unsupported URL' in err:
+            return jsonify({
+                "error": "Site not supported or DRM protected",
+                "details": "Try YouTube, Vimeo, Dailymotion, or non-DRM streaming sites"
+            }), 400
+        return jsonify({"error": err}), 400
 
 @app.route('/download', methods=['POST', 'OPTIONS'])
 def download_video():
@@ -338,49 +382,44 @@ def download_video():
 
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
     
-    # Initialize progress
     save_progress(file_id, {
-        "status": "Starting download...",
+        "status": "Starting...",
         "percent": "0%",
         "speed": "0 B/s",
         "eta": "Unknown"
     })
 
     try:
-        opts = get_ydl_opts(output_path, quality, format_type, file_id)
+        opts = get_ydl_opts(output_path, quality, format_type, file_id, referer_url=url)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            if not info:
+                raise Exception("Download failed")
             title = info.get('title', 'video')
 
-        # Find downloaded file
+        # Find file
         downloaded_file = None
-        expected_ext = 'mp3' if format_type == 'audio' else 'mp4'
-        primary_file = f"{output_path}.{expected_ext}"
-        
-        if os.path.exists(primary_file):
-            downloaded_file = primary_file
-        else:
-            for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3']:
-                candidate = f"{output_path}.{ext}"
-                if os.path.exists(candidate):
-                    downloaded_file = candidate
-                    break
+        for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3', 'mov']:
+            candidate = f"{output_path}.{ext}"
+            if os.path.exists(candidate):
+                downloaded_file = candidate
+                break
         
         if not downloaded_file:
-            for f in os.listdir(DOWNLOAD_FOLDER):
+            files = os.listdir(DOWNLOAD_FOLDER)
+            for f in files:
                 if f.startswith(file_id):
                     downloaded_file = os.path.join(DOWNLOAD_FOLDER, f)
                     break
 
         if not downloaded_file:
-            raise Exception("File not found after download")
+            raise Exception("File not found")
 
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip() or "video"
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip() or "download"
         ext = downloaded_file.split('.')[-1]
         file_size = os.path.getsize(downloaded_file)
         
-        # Mark complete
         save_progress(file_id, {
             "status": "Complete",
             "percent": "100%",
@@ -389,7 +428,7 @@ def download_video():
         })
 
         mime_map = {
-            'mp4': 'video/mp4', 'webm': 'video/webm',
+            'mp4': 'video/mp4', 'webm': 'video/webm', 'mov': 'video/quicktime',
             'mkv': 'video/x-matroska', 'mp3': 'audio/mpeg', 'm4a': 'audio/mp4'
         }
         mimetype = mime_map.get(ext, 'application/octet-stream')
@@ -398,7 +437,7 @@ def download_video():
         def generate():
             with open(downloaded_file, 'rb') as f:
                 while True:
-                    chunk = f.read(1024 * 1024)  # 1MB chunks
+                    chunk = f.read(1024 * 1024)
                     if not chunk:
                         break
                     yield chunk
@@ -416,16 +455,20 @@ def download_video():
 
     except yt_dlp.utils.DownloadError as e:
         err = str(e)
-        if '403' in err or 'blocked' in err.lower():
-            msg = "YouTube blocked request. Check cookies."
-        elif 'age' in err.lower() or 'sign in' in err.lower():
-            msg = "Age verification required."
-        elif 'private' in err.lower():
-            msg = "Video is private."
-        elif 'copyright' in err.lower():
-            msg = "Copyright blocked."
+        msg = "Download failed"
+        
+        if 'Unsupported URL' in err:
+            msg = "❌ Site not supported. Uses DRM or custom player."
+        elif '403' in err:
+            msg = "❌ Access blocked (403). Site uses bot protection."
+        elif 'DRM' in err or 'drm' in err:
+            msg = "❌ DRM protected (Netflix, Prime, etc). Cannot download."
+        elif '404' in err:
+            msg = "❌ Video not found. URL may be expired."
+        elif 'sign in' in err.lower() or 'login' in err.lower():
+            msg = "❌ Requires login. Try adding cookies in Railway dashboard."
         else:
-            msg = f"Download failed: {err[:200]}"
+            msg = f"❌ Error: {err[:150]}"
         
         delete_progress(file_id)
         return jsonify({"error": msg}), 400
