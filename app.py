@@ -10,46 +10,57 @@ import urllib.request
 import tarfile
 import shutil
 import re
+import json
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-DOWNLOAD_FOLDER = "downloads"
-COOKIES_FILE = "cookies.txt"
+# ✅ CRITICAL: Use /tmp for Railway's ephemeral storage
+DOWNLOAD_FOLDER = "/tmp/downloads"
+COOKIES_FILE = "/tmp/cookies.txt"  # Also put cookies in /tmp
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-# Dictionary to store real-time progress for each download
+# Thread-safe progress storage
 download_progress = {}
+progress_lock = threading.Lock()
 
-# Helper to remove terminal color codes from yt-dlp output
 def clean_ansi(text):
+    """Remove terminal color codes from yt-dlp output"""
+    if not text:
+        return "0%"
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    return ansi_escape.sub('', text)
+    return ansi_escape.sub('', str(text))
 
-# Custom hook to track download progress
 def progress_hook(d, file_id):
-    if d['status'] == 'downloading':
-        percent = clean_ansi(d.get('_percent_str', '0%')).strip()
-        speed = clean_ansi(d.get('_speed_str', '0 B/s')).strip()
-        eta = clean_ansi(d.get('_eta_str', 'Unknown')).strip()
-        
-        download_progress[file_id] = {
-            "status": "Downloading...",
-            "percent": percent,
-            "speed": speed,
-            "eta": eta
-        }
-    elif d['status'] == 'finished':
-        download_progress[file_id] = {
-            "status": "Processing file (Merging audio/video)...",
-            "percent": "100%",
-            "speed": "0 B/s",
-            "eta": "00:00"
-        }
+    """Capture yt-dlp progress updates"""
+    try:
+        with progress_lock:
+            if d['status'] == 'downloading':
+                percent = clean_ansi(d.get('_percent_str', '0%')).strip()
+                speed = clean_ansi(d.get('_speed_str', 'Unknown')).strip()
+                eta = clean_ansi(d.get('_eta_str', 'Unknown')).strip()
+                
+                download_progress[file_id] = {
+                    "status": "Downloading...",
+                    "percent": percent,
+                    "speed": speed,
+                    "eta": eta,
+                    "timestamp": time.time()
+                }
+            elif d['status'] == 'finished':
+                download_progress[file_id] = {
+                    "status": "Processing file (merging audio/video)...",
+                    "percent": "100%",
+                    "speed": "0 B/s",
+                    "eta": "00:00",
+                    "timestamp": time.time()
+                }
+    except Exception as e:
+        print(f"Progress hook error: {e}")
 
 # ========== FFMPEG SETUP ==========
 def setup_ffmpeg():
-    """Download static FFmpeg binary if system doesn't have it"""
     ffmpeg_dir = "/tmp/ffmpeg"
     ffmpeg_bin = os.path.join(ffmpeg_dir, "ffmpeg")
     ffprobe_bin = os.path.join(ffmpeg_dir, "ffprobe")
@@ -57,7 +68,7 @@ def setup_ffmpeg():
     if os.path.exists(ffmpeg_bin) and os.path.exists(ffprobe_bin):
         return ffmpeg_bin, ffprobe_bin
     
-    print("📥 FFmpeg not found in system, downloading static binary...")
+    print("📥 Downloading FFmpeg...")
     os.makedirs(ffmpeg_dir, exist_ok=True)
     
     try:
@@ -79,7 +90,7 @@ def setup_ffmpeg():
         os.chmod(ffmpeg_bin, 0o755)
         os.chmod(ffprobe_bin, 0o755)
         os.remove(tar_path)
-        print(f"✅ FFmpeg ready at: {ffmpeg_bin}")
+        print(f"✅ FFmpeg ready")
         return ffmpeg_bin, ffprobe_bin
         
     except Exception as e:
@@ -88,40 +99,63 @@ def setup_ffmpeg():
 
 FFMPEG_PATH, FFPROBE_PATH = setup_ffmpeg()
 
-# ========== COOKIES DOWNLOAD (Secret Gist) ==========
+# ========== COOKIES SETUP ==========
 def setup_cookies():
+    # Method 1: From Environment Variable (Railway Secret)
+    yt_cookies = os.environ.get('YT_COOKIES', '')
+    if yt_cookies and len(yt_cookies) > 10:
+        try:
+            with open(COOKIES_FILE, 'w') as f:
+                f.write(yt_cookies)
+            print("✅ Cookies loaded from env var")
+            return
+        except Exception as e:
+            print(f"⚠️ Failed to write cookies from env: {e}")
+    
+    # Method 2: From URL (GitHub Gist, etc.)
     cookies_url = os.environ.get('COOKIES_URL', '')
     if cookies_url:
         try:
-            print("📥 Downloading cookies from private URL...")
             urllib.request.urlretrieve(cookies_url, COOKIES_FILE)
-            print("✅ YouTube cookies loaded securely from Gist!")
+            print("✅ Cookies downloaded from URL")
+            return
         except Exception as e:
             print(f"⚠️ Failed to download cookies: {e}")
-    else:
-        print("⚠️ No COOKIES_URL found - some videos may be blocked")
+    
+    # Method 3: Check if cookies.txt exists in repo (committed file)
+    if os.path.exists("cookies.txt"):
+        try:
+            shutil.copy("cookies.txt", COOKIES_FILE)
+            print("✅ Cookies copied from repo")
+            return
+        except Exception as e:
+            print(f"⚠️ Failed to copy cookies: {e}")
+    
+    print("⚠️ No cookies configured")
 
-# Run the cookie download on startup
 setup_cookies()
 
-# ========== YT-DLP SETUP ==========
+# ========== USER AGENTS ==========
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
-def cleanup_file(filepath, file_id=None, delay=300):
+def cleanup_file(filepath, file_id=None, delay=120):
+    """Delete file after delay and clean up progress"""
     def delete():
         time.sleep(delay)
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
-            # Clean up memory dictionary
-            if file_id and file_id in download_progress:
-                del download_progress[file_id]
-        except: pass
+                print(f"🗑️ Cleaned up: {filepath}")
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+        finally:
+            if file_id:
+                with progress_lock:
+                    if file_id in download_progress:
+                        del download_progress[file_id]
     threading.Thread(target=delete, daemon=True).start()
 
 @app.after_request
@@ -133,7 +167,7 @@ def add_cors(response):
 
 def get_base_opts():
     opts = {
-        'quiet': True,
+        'quiet': True,  # Keep True, hooks work independently
         'no_warnings': True,
         'noplaylist': True,
         'socket_timeout': 60,
@@ -145,23 +179,30 @@ def get_base_opts():
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'tv', 'web'],
+                'player_client': ['android', 'ios', 'web'],
                 'player_skip': ['webpage', 'config'],
             }
         },
     }
-    if os.path.exists('cookies.txt'):
-        opts['cookiefile'] = 'cookies.txt'
-    elif os.path.exists(COOKIES_FILE):
+    
+    # Check multiple cookie locations
+    if os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
+    elif os.path.exists('/tmp/cookies.txt'):
+        opts['cookiefile'] = '/tmp/cookies.txt'
+    elif os.path.exists('cookies.txt'):
+        opts['cookiefile'] = 'cookies.txt'
+        
     return opts
 
 def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=None):
     opts = get_base_opts()
     
-    # Attach the progress hook if a file_id is provided
+    # ✅ CRITICAL: Attach progress hook
     if file_id:
         opts['progress_hooks'] = [lambda d: progress_hook(d, file_id)]
+        # Enable verbose to ensure hooks fire (only for debugging if needed)
+        # opts['verbose'] = True
     
     if FFMPEG_PATH and FFPROBE_PATH:
         opts['ffmpeg_location'] = FFMPEG_PATH
@@ -181,18 +222,19 @@ def get_ydl_opts(output_path=None, quality='720p', format_type='video', file_id=
         return opts
 
     quality_map = {
-        '4k':    'bestvideo[height<=2160]+bestaudio/best',
-        '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
-        '720p':  'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-        '480p':  'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
-        '360p':  'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
-        'best':  'bestvideo+bestaudio/best',
-    }
+    '4k':    'bestvideo[height<=2160]+bestaudio/best',
+    '1440p': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
+    '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+    '720p':  'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+    '480p':  'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+    '360p':  'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
+    '240p':  'bestvideo[height<=240]+bestaudio/best[height<=240]/best',
+}
 
     opts.update({
         'format': quality_map.get(quality, quality_map['720p']),
         'merge_output_format': 'mp4',
-        'concurrent_fragment_downloads': 4,
+        'concurrent_fragment_downloads': 2,  # Reduced for stability
     })
 
     if output_path:
@@ -207,25 +249,26 @@ def home():
     ffmpeg_status = "available" if FFMPEG_PATH else "missing"
     return jsonify({
         "status": "Downlynk backend is running!",
-        "version": "3.0.1",
+        "version": "3.1.0",
         "cookies": cookies_status,
         "ffmpeg": ffmpeg_status,
+        "time": datetime.now().isoformat()
     })
 
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
 
-# New endpoint to fetch progress
 @app.route('/progress/<file_id>', methods=['GET'])
 def get_progress(file_id):
-    # Default to 0% if the download hasn't registered in the hook yet
-    data = download_progress.get(file_id, {
-        "status": "Starting download...",
-        "percent": "0%",
-        "speed": "0 B/s",
-        "eta": "Unknown"
-    })
+    """Return current progress for a download"""
+    with progress_lock:
+        data = download_progress.get(file_id, {
+            "status": "Initializing...",
+            "percent": "0%",
+            "speed": "0 B/s",
+            "eta": "Unknown"
+        })
     return jsonify(data)
 
 @app.route('/info', methods=['POST', 'OPTIONS'])
@@ -243,26 +286,22 @@ def get_info():
         opts['skip_download'] = True
 
         with yt_dlp.YoutubeDL(opts) as ydl:
-            # We don't download, just grab metadata
             info = ydl.extract_info(url, download=False)
-            
-            # YouTube returns a list of formats
             formats = info.get('formats', [])
-            qualities_list = []
+            qualities_set = set()
             
             for f in formats:
                 h = f.get('height')
-                # Check for height and ensure there is a video codec
                 if h and f.get('vcodec') != 'none':
-                    if h >= 2160 and '4k' not in qualities_list: qualities_list.append('4k')
-                    elif h >= 1080 and '1080p' not in qualities_list: qualities_list.append('1080p')
-                    elif h >= 720 and '720p' not in qualities_list: qualities_list.append('720p')
-                    elif h >= 480 and '480p' not in qualities_list: qualities_list.append('480p')
-                    elif h >= 360 and '360p' not in qualities_list: qualities_list.append('360p')
+                    if h >= 2160: qualities_set.add('4k')
+                    elif h >= 1080: qualities_set.add('1080p')
+                    elif h >= 720: qualities_set.add('720p')
+                    elif h >= 480: qualities_set.add('480p')
+                    elif h >= 360: qualities_set.add('360p')
+                    elif h >= 240: qualities_set.add('240p')
 
-            # Sort qualities from high to low
-            order = ['4k', '1080p', '720p', '480p', '360p']
-            sorted_qualities = [q for q in order if q in qualities_list]
+            order = ['4k', '1080p', '720p', '480p', '360p', '240p']
+            sorted_qualities = [q for q in order if q in qualities_set]
 
             return jsonify({
                 "title": str(info.get('title', 'Unknown')),
@@ -285,8 +324,6 @@ def download_video():
     url = (data or {}).get('url', '').strip()
     quality = (data or {}).get('quality', '720p')
     format_type = (data or {}).get('format', 'video')
-    
-    # Grab the file_id generated by the frontend, or generate one if missing
     file_id = (data or {}).get('file_id', str(uuid.uuid4()))
 
     if not url:
@@ -294,94 +331,113 @@ def download_video():
 
     output_path = os.path.join(DOWNLOAD_FOLDER, file_id)
     
-    # Initialize progress tracker
-    download_progress[file_id] = {
-        "status": "Starting download...",
-        "percent": "0%",
-        "speed": "0 B/s",
-        "eta": "Unknown"
-    }
+    # Initialize progress
+    with progress_lock:
+        download_progress[file_id] = {
+            "status": "Starting download...",
+            "percent": "0%",
+            "speed": "0 B/s",
+            "eta": "Unknown",
+            "timestamp": time.time()
+        }
 
     try:
-        # Pass file_id into options
         opts = get_ydl_opts(output_path, quality, format_type, file_id)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'video')
 
+        # Find the downloaded file
         downloaded_file = None
-        for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3']:
-            candidate = output_path + '.' + ext
-            if os.path.exists(candidate):
-                downloaded_file = candidate
-                break
-
+        expected_ext = 'mp3' if format_type == 'audio' else 'mp4'
+        
+        # Check primary expected file
+        primary_file = f"{output_path}.{expected_ext}"
+        if os.path.exists(primary_file):
+            downloaded_file = primary_file
+        else:
+            # Check all possible extensions
+            for ext in ['mp4', 'webm', 'mkv', 'm4a', 'mp3']:
+                candidate = f"{output_path}.{ext}"
+                if os.path.exists(candidate):
+                    downloaded_file = candidate
+                    break
+        
+        # Fallback: search directory
         if not downloaded_file:
-            # Fallback search if yt-dlp added a weird extension
             for f in os.listdir(DOWNLOAD_FOLDER):
                 if f.startswith(file_id):
                     downloaded_file = os.path.join(DOWNLOAD_FOLDER, f)
                     break
 
         if not downloaded_file:
-            return jsonify({"error": "File not found after download"}), 500
+            raise Exception("File not found after download")
 
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip() or "video"
         ext = downloaded_file.split('.')[-1]
         file_size = os.path.getsize(downloaded_file)
+        
+        # Update progress to complete
+        with progress_lock:
+            download_progress[file_id] = {
+                "status": "Complete",
+                "percent": "100%",
+                "speed": "0 B/s",
+                "eta": "00:00",
+                "timestamp": time.time()
+            }
 
         mime_map = {
             'mp4': 'video/mp4', 'webm': 'video/webm',
             'mkv': 'video/x-matroska', 'mp3': 'audio/mpeg', 'm4a': 'audio/mp4'
         }
         mimetype = mime_map.get(ext, 'application/octet-stream')
-        dl_name = f"{safe_title}.{'mp3' if format_type == 'audio' else ext}"
+        dl_name = f"{safe_title}.{ext}"
 
         def generate():
             with open(downloaded_file, 'rb') as f:
                 while True:
-                    chunk = f.read(512 * 1024)
+                    chunk = f.read(1024 * 1024)  # 1MB chunks
                     if not chunk:
                         break
                     yield chunk
-            # Once stream is finished, trigger the file and memory cleanup
-            cleanup_file(downloaded_file, file_id=file_id, delay=120)
+            # Cleanup after streaming
+            cleanup_file(downloaded_file, file_id=file_id, delay=60)
 
         return Response(
             stream_with_context(generate()),
             mimetype=mimetype,
             headers={
-                'Content-Type': 'application/octet-stream',
                 'Content-Disposition': f'attachment; filename="{dl_name}"',
                 'Content-Length': str(file_size),
-                'Access-Control-Allow-Origin': '*',
+                'X-Accel-Buffering': 'no',  # Disable nginx buffering for streaming
             }
         )
 
     except yt_dlp.utils.DownloadError as e:
         err = str(e)
         if '403' in err or 'blocked' in err.lower():
-            msg = "YouTube blocked this request. Update YouTube cookies to fix this."
+            msg = "YouTube blocked this request. Check cookies."
         elif 'age' in err.lower() or 'sign in' in err.lower():
-            msg = "This video requires age verification. Update YouTube cookies to download it."
-        elif 'private' in err.lower() or 'not available' in err.lower():
-            msg = "This video is private or unavailable."
+            msg = "Age verification required. Update YouTube cookies."
+        elif 'private' in err.lower():
+            msg = "This video is private."
         elif 'copyright' in err.lower():
-            msg = "This video is blocked due to copyright."
+            msg = "Copyright blocked."
         else:
             msg = f"Download failed: {err[:200]}"
         
-        # Clear failed progress from memory
-        if file_id in download_progress:
-            del download_progress[file_id]
-            
+        with progress_lock:
+            if file_id in download_progress:
+                del download_progress[file_id]
         return jsonify({"error": msg}), 400
         
     except Exception as e:
-        if file_id in download_progress:
-            del download_progress[file_id]
-        return jsonify({"error": f"Server error: {str(e)[:200]}"}), 500
+        with progress_lock:
+            if file_id in download_progress:
+                del download_progress[file_id]
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
